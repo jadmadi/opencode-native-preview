@@ -123,6 +123,11 @@ rm -rf "$out"
 mkdir -p "$out/licenses"
 for f in $files; do cp "$lib/$f" "$out/$f"; done
 for pair in $licenses; do cp "$src/${pair#*:}" "$out/licenses/${pair%%:*}"; done
+# And every licence and source notice opentui-sys ships, as the release zip carries them: a pin may add some (the
+# toolchain runtimes a static Windows library links) that the list above does not name yet.
+for path in "$src"/packages/rust/crates/opentui-sys/LICENSE* "$src"/packages/rust/crates/opentui-sys/*-SOURCE.md; do
+  if [ -f "$path" ]; then cp "$path" "$out/licenses/${path##*/}"; fi
+done
 cat >"$out/STAMP" <<EOF
 commit=$rev
 target=$target

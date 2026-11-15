@@ -497,26 +497,59 @@ jobs:
           OPENCODE_RS_COMMIT: ${{ needs.plan.outputs.commit }}
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --locked --profile dist --target "$TARGET" --bin "$BIN"
+      - name: Imports - does the .exe need opentui.dll?
+        # v0.9.0's opentui-sys links opentui.dll on Windows (D85); one that links opentui-static.lib on MSVC (OpenTUI
+        # #2140) makes the .exe one file. The zip ships opentui.dll only when the built .exe imports it.
+        id: imports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          # The runner's own host tools (Hostx64 on windows-2025, HostARM64 on windows-11-arm); either target's dumpbin
+          # reads either machine's executable.
+          $tools = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'HostARM64' } else { 'Hostx64' }
+          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\*\bin\$tools\*\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          "DUMPBIN=$dumpbin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $exe = "opencode\packages\cli-rs\target\$env:TARGET\dist\$env:BIN.exe"
+          $deps = & $dumpbin /nologo /dependents $exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } |
+            ForEach-Object { $_.Trim().ToLowerInvariant() }
+          if ($deps -contains 'opentui.dll') {
+            if (-not (Test-Path native\opentui.dll)) { throw 'the .exe imports opentui.dll, which the archive lacks' }
+            $layout = 'dll'
+          } else {
+            if (-not (Test-Path native\opentui-static.lib)) { throw 'the .exe imports no opentui.dll, but the archive has no opentui-static.lib' }
+            $layout = 'static'
+          }
+          "layout=$layout" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "OpenTUI on Windows: $layout (dependents: $($deps -join ', '))" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
       - uses: actions/download-artifact@v5
         with:
           name: notices
           path: stage
       - name: Package and smoke test
         id: package
+        env:
+          LAYOUT: ${{ steps.imports.outputs.layout }}
         run: |
           set -euo pipefail
           mkdir -p stage/licenses/opentui dist debug
           cp "opencode/packages/cli-rs/target/$TARGET/dist/$BIN.exe" stage/opencode-native.exe
-          cp native/opentui.dll opencode/LICENSE stage/
-          # The crates' notice, and OpenTUI's licence files (its own, FFmpeg's and the rest opentui.dll carries).
+          cp opencode/LICENSE stage/
+          files=(opencode-native.exe LICENSE THIRD-PARTY-NOTICES.txt licenses)
+          if [ "$LAYOUT" = dll ]; then
+            cp native/opentui.dll stage/
+            files+=(opentui.dll)
+          fi
+          # The crates' notice, and every licence and source notice of OpenTUI's archive (its own, FFmpeg's and the
+          # rest its library carries).
           cp native/licenses/* stage/licenses/opentui/
           test -s stage/THIRD-PARTY-NOTICES.txt
           cp "opencode/packages/cli-rs/target/$TARGET/dist/${BIN//-/_}.pdb" debug/opencode_native.pdb || true
           out=$(stage/opencode-native.exe --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
-          (cd stage && 7z a -tzip "../dist/opencode-native-$VERSION-$TARGET.zip" opencode-native.exe opentui.dll LICENSE \
-            THIRD-PARTY-NOTICES.txt licenses >/dev/null)
+          (cd stage && 7z a -tzip "../dist/opencode-native-$VERSION-$TARGET.zip" "${files[@]}" >/dev/null)
           7z l "dist/opencode-native-$VERSION-$TARGET.zip"
           ls -l stage dist
       - uses: actions/upload-artifact@v4
@@ -536,22 +569,20 @@ jobs:
           "$out"
           if ("$out" -notlike "*$env:VERSION*") { throw "--version printed '$out', not $env:VERSION" }
 
-      - name: Smoke 2 - dependents are system DLLs and opentui.dll (+crt-static)
+      - name: Smoke 2 - dependents are system DLLs, and opentui.dll as the layout says (+crt-static)
         # Each smoke runs once the package exists, also after an earlier smoke failed.
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         shell: pwsh
+        env:
+          LAYOUT: ${{ steps.imports.outputs.layout }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          # The runner's own host tools (Hostx64 on windows-2025, HostARM64 on windows-11-arm); either target's dumpbin
-          # reads either machine's executable.
-          $tools = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'HostARM64' } else { 'Hostx64' }
-          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\*\bin\$tools\*\dumpbin.exe" | Select-Object -First 1
-          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
-          $text = & $dumpbin /nologo /dependents stage\opencode-native.exe
+          $text = & $env:DUMPBIN /nologo /dependents stage\opencode-native.exe
           $text
           $deps = $text | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim().ToLowerInvariant() }
-          if (-not ($deps -contains 'opentui.dll')) { throw 'opentui.dll is not a dependent' }
+          $dll = $deps -contains 'opentui.dll'
+          if ($env:LAYOUT -eq 'dll' -and -not $dll) { throw 'opentui.dll is not a dependent' }
+          if ($env:LAYOUT -eq 'static' -and $dll) { throw 'the static build imports opentui.dll' }
           $crt = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' }
           if ($crt) { throw "dynamic CRT imports (no +crt-static?): $($crt -join ', ')" }
           $system = "$env:SystemRoot\System32"
@@ -561,10 +592,13 @@ jobs:
           if ($other) { throw "non-system dependents: $($other -join ', ')" }
           "dependents: $($deps -join ', ')" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
-      - name: Smoke 3 - without opentui.dll the loader fails with 0xC0000135
+      - name: Smoke 3 - the .exe alone, with no opentui.dll beside it or on PATH
+        # The DLL layout must fail with 0xC0000135, which proves the zip needs the DLL; the static one must run.
         # Each smoke runs once the package exists, also after an earlier smoke failed.
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         shell: pwsh
+        env:
+          LAYOUT: ${{ steps.imports.outputs.layout }}
         run: |
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:RUNNER_TEMP 'no-dll'
@@ -577,8 +611,9 @@ jobs:
           $null = $p.Handle
           if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'hung without opentui.dll' }
           $code = '{0:X8}' -f $p.ExitCode
-          "exit 0x$code"
-          if ($code -ne 'C0000135') { throw "expected 0xC0000135 (STATUS_DLL_NOT_FOUND), got 0x$code" }
+          "exit 0x$code ($env:LAYOUT)"
+          if ($env:LAYOUT -eq 'dll' -and $code -ne 'C0000135') { throw "expected 0xC0000135 (STATUS_DLL_NOT_FOUND), got 0x$code" }
+          if ($env:LAYOUT -eq 'static' -and $code -ne '00000000') { throw "the one-file .exe exited 0x$code" }
 
       - name: Smoke 4 - TS opencode, session list, service stop (W5)
         # Each smoke runs once the package exists, also after an earlier smoke failed.
@@ -667,6 +702,25 @@ jobs:
           $env:PATH = "$env:OPENTUI_LIB_DIR;$env:PATH"
           cargo test --locked --target $env:TARGET -p opencode-cli --test windows_smoke -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "windows_smoke failed ($LASTEXITCODE)" }
+
+      - name: Smoke 6 - unwinding and thread-locals on arm64 (plugin containment)
+        # The first place anything links and runs on arm64 Windows: OpenTUI has no such runner. The loader's rows load
+        # sample plugin libraries (.dll, built for this target) whose commands and views panic; each panic unwinds
+        # inside its library or the test binary and is caught there (catch_unwind on SEH), with the containment
+        # depth and the hash caches in thread-locals. No cheap client path throws a C++ exception: Yoga's
+        # try/catch in OpenTUI's yoga-bridge.cpp is entered on every layout (Smoke 5's TUI), but Yoga throws only on
+        # an internal assertion that the native side's checks prevent.
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.target == 'aarch64-pc-windows-msvc' }}
+        shell: pwsh
+        working-directory: opencode/packages/cli-rs
+        env:
+          OPENTUI_LIB_DIR: ${{ github.workspace }}\native
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:OPENTUI_LIB_DIR;$env:PATH"
+          cargo test --locked --target $env:TARGET -p opencode-plugin --lib -- contain:: loader::native::
+          if ($LASTEXITCODE -ne 0) { throw "plugin containment rows failed ($LASTEXITCODE)" }
 
       # After every smoke passed, so a zip that failed one never reaches the release (an optional target's job does not
       # fail it).

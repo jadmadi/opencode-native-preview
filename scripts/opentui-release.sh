@@ -6,8 +6,8 @@
 #          nothing when no release in the table below has it: then build from source (scripts/opentui-native.sh).
 #        scripts/opentui-release.sh fetch <tag> <rust-target> <out-dir> <header-fnv1a64>
 #          Downloads opentui-native-<tag>-<platform>.zip, checks it against its sha256 below and its opentui.h
-#          against <header-fnv1a64>, and installs opentui.h, the libraries opentui-sys reads, the zip's licence files
-#          (under <out-dir>/licenses) and STAMP into <out-dir>.
+#          against <header-fnv1a64>, and installs opentui.h, the libraries opentui-sys reads, every licence and
+#          source-notice file the zip ships (under <out-dir>/licenses) and STAMP into <out-dir>.
 #
 # The zips carry no attestation, so the sha256 table is the control: add a release's rows from
 # `gh release view <tag> -R anomalyco/opentui --json assets` in the change that moves to it, after checking that its
@@ -28,9 +28,12 @@ v0.9.0 0xfcf352f7f1c874b8 windows-arm64 11e7361f5ec5d183419f6d953bc767cf3a209002
 EOF
 }
 
-# The licence files of a native zip: OpenTUI's own and those of what its library carries (FFmpeg, zlib, Ghostty,
-# libwebp, Wuffs, stb, Little CMS). Every archive ships them under licenses/opentui.
-LICENSES="LICENSE LICENSE-FFMPEG FFMPEG-SOURCE.md LICENSE-ZLIB LICENSE-GHOSTTY LICENSE-LIBWEBP AUTHORS-LIBWEBP PATENTS-LIBWEBP LICENSE-WUFFS LICENSE-STB LICENSE-LCMS2"
+# The licence and source-notice files of a native zip, by name: OpenTUI's own and those of everything its library
+# carries (FFmpeg, zlib, Ghostty, libwebp, Wuffs, stb, Little CMS in v0.9.0; a release may add more, such as the
+# toolchain runtimes a static Windows library carries). Every archive ships them all under licenses/opentui.
+is_notice() {
+  case $1 in LICENSE* | COPYING* | NOTICE* | AUTHORS* | PATENTS* | *-SOURCE.md) return 0 ;; *) return 1 ;; esac
+}
 
 fnv1a64() {
   python3 -I -c '
@@ -53,14 +56,15 @@ case ${1:-} in
   fetch)
     [ $# -eq 5 ] || die "usage: $0 fetch <tag> <rust-target> <out-dir> <header-fnv1a64>"
     tag=$2 target=$3 out=$4 header=$5
-    # D85: Windows links opentui.dll through its import library, with or without the static feature.
+    # The files opentui-sys may read: on Windows the DLL and its import library (D85, v0.9.0's opentui-sys) and
+    # opentui-static.lib, which an opentui-sys that links statically on MSVC reads instead; whichever the zip has.
     case $target in
       x86_64-unknown-linux-gnu) platform=linux-x64 files="opentui.h libopentui.a" ;;
       aarch64-unknown-linux-gnu) platform=linux-arm64 files="opentui.h libopentui.a" ;;
       x86_64-apple-darwin) platform=darwin-x64 files="opentui.h libopentui.a" ;;
       aarch64-apple-darwin) platform=darwin-arm64 files="opentui.h libopentui.a" ;;
-      x86_64-pc-windows-msvc) platform=windows-x64 files="opentui.h opentui.dll opentui.lib" ;;
-      aarch64-pc-windows-msvc) platform=windows-arm64 files="opentui.h opentui.dll opentui.lib" ;;
+      x86_64-pc-windows-msvc) platform=windows-x64 files="opentui.h" optional="opentui.dll opentui.lib opentui-static.lib" ;;
+      aarch64-pc-windows-msvc) platform=windows-arm64 files="opentui.h" optional="opentui.dll opentui.lib opentui-static.lib" ;;
       *) die "unsupported target $target" ;;
     esac
     row=$(table | awk -v tag="$tag" -v platform="$platform" '$1 == tag && $3 == platform')
@@ -77,11 +81,23 @@ case ${1:-} in
     unzip -q "$work/$name" -d "$work/zip"
     built=$(fnv1a64 "$work/zip/opentui.h")
     [ "$built" = "$header" ] || die "$name's opentui.h hashes to $built, not $header"
-    for f in $files $LICENSES; do [ -f "$work/zip/$f" ] || die "$name has no $f"; done
+    for f in ${optional:-}; do
+      if [ -f "$work/zip/$f" ]; then files="$files $f"; fi
+    done
+    case $files in
+      *opentui-static.lib* | *libopentui.a* | *opentui.dll*opentui.lib*) ;;
+      *) die "$name has no library to link: $(cd "$work/zip" && printf '%s ' *)" ;;
+    esac
+    for f in $files; do [ -f "$work/zip/$f" ] || die "$name has no $f"; done
+    notices=$(for path in "$work/zip"/*; do
+      if [ -f "$path" ] && is_notice "${path##*/}"; then echo "${path##*/}"; fi
+    done)
+    [ -n "$notices" ] || die "$name has no licence files"
+    printf '%s\n' "$notices" | grep -qx LICENSE || die "$name has no LICENSE (OpenTUI's own)"
     rm -rf "$out"
     mkdir -p "$out/licenses"
     for f in $files; do cp "$work/zip/$f" "$out/$f"; done
-    for f in $LICENSES; do cp "$work/zip/$f" "$out/licenses/$f"; done
+    for f in $notices; do cp "$work/zip/$f" "$out/licenses/$f"; done
     cat >"$out/STAMP" <<EOF
 release=$tag
 zip=$name
@@ -89,7 +105,7 @@ sha256=$got
 target=$target
 header_fnv1a64=$built
 EOF
-    echo "opentui-release: installed $files and licenses/ from $name into $out"
+    echo "opentui-release: installed $files and licenses/ ($(printf '%s' "$notices" | tr '\n' ' ')) from $name into $out"
     ;;
   *) die "usage: $0 tag <header-fnv1a64> | fetch <tag> <rust-target> <out-dir> <header-fnv1a64>" ;;
 esac
