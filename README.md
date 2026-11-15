@@ -76,7 +76,7 @@ On Debian and Ubuntu, download the `.deb` from the [latest release](https://gith
 and run `sudo apt install ./opencode-native_*.deb`.
 
 Each archive holds OpenCode's `LICENSE`, `THIRD-PARTY-NOTICES.txt` (the licences of the Rust crates in the binary,
-the tree-sitter grammars among them) and `licenses/opentui/` (OpenTUI's licence and those of what its native library
+the tree-sitter grammars among them, and of the sources of its highlight queries) and `licenses/opentui/` (OpenTUI's licence and those of what its native library
 carries: FFmpeg under the LGPL with its source in `FFMPEG-SOURCE.md`, zlib, Ghostty, libwebp, Wuffs, stb, Little CMS).
 The `.deb` installs them in `/usr/share/doc/opencode-native`. The install script installs only the binary.
 

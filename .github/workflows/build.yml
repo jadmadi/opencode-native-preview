@@ -110,7 +110,8 @@ jobs:
           echo "$REF -> $commit (dev base $dev_base), OpenTUI $rev ($hash, Zig $zig, native ${release:-from source}), binary $bin, version $version, skip=$skip" >> "$GITHUB_STEP_SUMMARY"
 
   # THIRD-PARTY-NOTICES.txt for every archive: the licences of the crates linked into the binary (the tree-sitter
-  # grammars among them), read from Cargo.lock by cargo-about, with notices/about.toml's allow-list.
+  # grammars among them), read from Cargo.lock by cargo-about, with notices/about.toml's allow-list; then the highlight
+  # queries compiled in, with their sources' licences (notices/queries.py).
   notices:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
@@ -148,6 +149,9 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/notices-out"
           cargo-about generate --frozen -c "$GITHUB_WORKSPACE/notices/about.toml" -m crates/cli/Cargo.toml \
             -o "$GITHUB_WORKSPACE/notices-out/THIRD-PARTY-NOTICES.txt" "$GITHUB_WORKSPACE/notices/about.hbs"
+          # The highlight queries compiled in, with their sources' licences (notices/queries.tsv).
+          python3 -I "$GITHUB_WORKSPACE/notices/queries.py" . "$GITHUB_WORKSPACE/notices-out/THIRD-PARTY-NOTICES.txt" |
+            tee -a "$GITHUB_STEP_SUMMARY"
           sed -n '/^Licences:/,/^$/p' "$GITHUB_WORKSPACE/notices-out/THIRD-PARTY-NOTICES.txt" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
