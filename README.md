@@ -77,7 +77,8 @@ and run `sudo apt install ./opencode-native_*.deb`.
 
 Each archive holds OpenCode's `LICENSE`, `THIRD-PARTY-NOTICES.txt` (the licences of the Rust crates in the binary,
 the tree-sitter grammars among them, and of the sources of its highlight queries) and `licenses/opentui/` (OpenTUI's licence and those of what its native library
-carries: FFmpeg under the LGPL with its source in `FFMPEG-SOURCE.md`, zlib, Ghostty, libwebp, Wuffs, stb, Little CMS).
+carries, as its release ships them: FFmpeg under the LGPL with its source in `FFMPEG-SOURCE.md`, zlib, Ghostty,
+libwebp, Wuffs, stb, Little CMS and others).
 The `.deb` installs them in `/usr/share/doc/opencode-native`. The install script installs only the binary.
 
 ## Requirements
@@ -93,8 +94,8 @@ The binary has only an ad-hoc signature. If you downloaded an archive with a bro
 ## Windows
 
 Download `opencode-native-<version>-x86_64-pc-windows-msvc.zip` (or `aarch64-pc-windows-msvc` on Arm) from the
-[latest release](https://github.com/simonklee/opencode-native-preview/releases) and extract it; keep `opentui.dll` next
-to `opencode-native.exe`. If Windows blocks the download, run `Unblock-File` on the zip before extracting. Install the
+[latest release](https://github.com/simonklee/opencode-native-preview/releases) and extract it; if it holds `opentui.dll`,
+keep it next to `opencode-native.exe`. If Windows blocks the download, run `Unblock-File` on the zip before extracting. Install the
 TypeScript CLI with `npm i -g @opencode/cli`. Each build is tested on GitHub's Windows Server 2025 runner (Arm: Windows
 11 Arm), with the TUI on a pseudoconsole (ConPTY); no other terminal is tested.
 
