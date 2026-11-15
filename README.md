@@ -3,7 +3,8 @@
 The OpenCode native CLI, `opencode-native`, is a Rust client for [OpenCode](https://github.com/anomalyco/opencode),
 built from its `oc-rust` branch. Each build is an unsigned
 [prerelease](https://github.com/simonklee/opencode-native-preview/releases) for Linux x64, Linux arm64, macOS arm64,
-and Windows x64, for testers.
+and Windows x64, for testers. macOS x64 and Windows arm64 builds are new: a release has them when they passed their
+smoke tests.
 
 ## Startup and memory
 
@@ -74,6 +75,11 @@ build attestation: `gh attestation verify opencode-native-<version>-<target>.tar
 On Debian and Ubuntu, download the `.deb` from the [latest release](https://github.com/simonklee/opencode-native-preview/releases)
 and run `sudo apt install ./opencode-native_*.deb`.
 
+Each archive holds OpenCode's `LICENSE`, `THIRD-PARTY-NOTICES.txt` (the licences of the Rust crates in the binary,
+the tree-sitter grammars among them) and `licenses/opentui/` (OpenTUI's licence and those of what its native library
+carries: FFmpeg under the LGPL with its source in `FFMPEG-SOURCE.md`, zlib, Ghostty, libwebp, Wuffs, stb, Little CMS).
+The `.deb` installs them in `/usr/share/doc/opencode-native`. The install script installs only the binary.
+
 ## Requirements
 
 Install the TypeScript CLI, 2.2.7 or newer, on `PATH` (or set `OPENCODE_TS_BIN` to it): `npm i -g @opencode/cli`.
@@ -86,11 +92,11 @@ The binary has only an ad-hoc signature. If you downloaded an archive with a bro
 
 ## Windows
 
-Download `opencode-native-<version>-x86_64-pc-windows-msvc.zip` from the
+Download `opencode-native-<version>-x86_64-pc-windows-msvc.zip` (or `aarch64-pc-windows-msvc` on Arm) from the
 [latest release](https://github.com/simonklee/opencode-native-preview/releases) and extract it; keep `opentui.dll` next
 to `opencode-native.exe`. If Windows blocks the download, run `Unblock-File` on the zip before extracting. Install the
-TypeScript CLI with `npm i -g @opencode/cli`. Each build is tested on GitHub's Windows Server 2025 runner, with the TUI
-on a pseudoconsole (ConPTY); no other terminal is tested.
+TypeScript CLI with `npm i -g @opencode/cli`. Each build is tested on GitHub's Windows Server 2025 runner (Arm: Windows
+11 Arm), with the TUI on a pseudoconsole (ConPTY); no other terminal is tested.
 
 ## Reporting bugs
 

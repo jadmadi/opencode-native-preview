@@ -9,8 +9,10 @@
 # build the static FFmpeg, then `zig build -Doptimize=ReleaseFast -Dlibrary-target=<zig target>`.
 # It stops when the build dropped video, and when opentui.h does not hash (FNV-1a 64) to
 # OPENTUI_HEADER_FNV1A64 in opentui-sys's generated.rs at that commit, before and after the build.
-# It installs opentui.h, the libraries the target links, and STAMP into <out-dir>, and does nothing
-# when <out-dir>/STAMP already names that commit and hash.
+# It installs opentui.h, the libraries the target links, the licence files a release zip carries (under
+# <out-dir>/licenses), and STAMP into <out-dir>, and does nothing when <out-dir>/STAMP already names that
+# commit and hash. A pin whose header an OpenTUI release has takes that release's zip instead
+# (scripts/opentui-release.sh); this build is the fallback for a pin between releases.
 #
 # Needs git, python3, Bun, and the Zig that packages/native/build.zig.zon names, on PATH.
 # The Windows library is cross-built (FFmpeg does not build on Windows hosts): run it on Linux.
@@ -33,8 +35,23 @@ case $target in
   x86_64-apple-darwin) zig_target=x86_64-macos.13.0 name=x86_64-macos files="opentui.h libopentui.a libopentui.dylib" ;;
   # D85: Windows links opentui.dll through its import library, with or without the static feature.
   x86_64-pc-windows-msvc) zig_target=x86_64-windows-gnu name=x86_64-windows files="opentui.h opentui.dll opentui.lib" ;;
+  aarch64-pc-windows-msvc) zig_target=aarch64-windows-gnu name=aarch64-windows files="opentui.h opentui.dll opentui.lib" ;;
   *) die "unsupported target $target" ;;
 esac
+
+# The licence files a release zip carries, by their name there and their place in the tree; each archive ships them
+# under licenses/opentui (scripts/opentui-release.sh's LICENSES).
+licenses="LICENSE:LICENSE
+LICENSE-FFMPEG:packages/rust/crates/opentui-sys/LICENSE-FFMPEG
+FFMPEG-SOURCE.md:packages/rust/crates/opentui-sys/FFMPEG-SOURCE.md
+LICENSE-ZLIB:packages/rust/crates/opentui-sys/LICENSE-ZLIB
+LICENSE-GHOSTTY:packages/core/THIRD_PARTY_LICENSES/GHOSTTY
+LICENSE-LIBWEBP:packages/native/src/vendor/libwebp/COPYING
+AUTHORS-LIBWEBP:packages/native/src/vendor/libwebp/AUTHORS
+PATENTS-LIBWEBP:packages/native/src/vendor/libwebp/PATENTS
+LICENSE-WUFFS:packages/native/src/vendor/wuffs/LICENSE
+LICENSE-STB:packages/native/src/vendor/stb/LICENSE
+LICENSE-LCMS2:packages/native/src/vendor/lcms2/LICENSE"
 
 [ -f "$client" ] || die "no $client; set OPENCODE_DIR to the opencode checkout"
 rev=$(sed -nE 's/^opentui *= *\{.*git *= *"https:\/\/github\.com\/anomalyco\/opentui(\.git)?".*rev *= *"([0-9a-f]{40})".*/\2/p' "$client")
@@ -54,6 +71,7 @@ stamp_value() { sed -n "s/^$1=//p" "$out/STAMP" 2>/dev/null || true; }
 if [ "$(stamp_value commit)" = "$rev" ] && [ "$(stamp_value target)" = "$target" ]; then
   expected=$(stamp_value header_fnv1a64)
   for f in $files; do [ -f "$out/$f" ] || die "$out/STAMP names $rev but $f is missing"; done
+  for pair in $licenses; do [ -f "$out/licenses/${pair%%:*}" ] || die "$out/STAMP names $rev but licenses/${pair%%:*} is missing"; done
   [ "$(fnv1a64 "$out/opentui.h")" = "$expected" ] || die "$out/opentui.h does not hash to $expected from STAMP"
   echo "opentui-native: $out is up to date ($rev, $target, $expected)"
   exit 0
@@ -63,7 +81,8 @@ src=${OPENTUI_SRC:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/opentui-$rev}
 if [ ! -d "$src/.git" ]; then
   git init -q "$src"
   git -C "$src" remote add origin https://github.com/anomalyco/opentui
-  git -C "$src" sparse-checkout set packages/native packages/rust/crates/opentui-sys/src packages/core/src/lib
+  git -C "$src" sparse-checkout set packages/native packages/rust/crates/opentui-sys packages/core/src/lib \
+    packages/core/THIRD_PARTY_LICENSES
   git -C "$src" fetch -q --depth 1 --filter=blob:none origin "$rev"
   git -C "$src" checkout -q --detach FETCH_HEAD
 fi
@@ -98,10 +117,12 @@ lib=$native/lib/$name
 built=$(fnv1a64 "$lib/opentui.h")
 [ "$built" = "$expected" ] || die "built $lib/opentui.h hashes to $built, not $expected"
 for f in $files; do [ -f "$lib/$f" ] || die "the build made no $f; $lib has: $(ls "$lib" | tr '\n' ' ')"; done
+for pair in $licenses; do [ -f "$src/${pair#*:}" ] || die "$rev has no ${pair#*:}"; done
 
 rm -rf "$out"
-mkdir -p "$out"
+mkdir -p "$out/licenses"
 for f in $files; do cp "$lib/$f" "$out/$f"; done
+for pair in $licenses; do cp "$src/${pair#*:}" "$out/licenses/${pair%%:*}"; done
 cat >"$out/STAMP" <<EOF
 commit=$rev
 target=$target

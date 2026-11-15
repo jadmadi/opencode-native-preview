@@ -20,8 +20,8 @@ at_least() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]; 
 case $(uname -s) in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
-  MINGW* | MSYS* | CYGWIN*) die "on Windows, download the x86_64-pc-windows-msvc zip from https://github.com/$REPO/releases and extract it (see the README)" ;;
-  *) die "unsupported OS $(uname -s); previews exist for Linux x64, Linux arm64 and macOS arm64" ;;
+  MINGW* | MSYS* | CYGWIN*) die "on Windows, download the x86_64-pc-windows-msvc (or aarch64-pc-windows-msvc) zip from https://github.com/$REPO/releases and extract it (see the README)" ;;
+  *) die "unsupported OS $(uname -s); previews exist for Linux and macOS, x64 and arm64" ;;
 esac
 case $(uname -m) in
   x86_64 | amd64) arch=x86_64 ;;
@@ -30,10 +30,12 @@ case $(uname -m) in
 esac
 
 if [ "$os" = darwin ]; then
-  # A Rosetta shell reports x86_64 on Apple silicon.
-  [ "$arch" = aarch64 ] || [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] ||
-    die "only Apple silicon (arm64) Macs have a preview build"
-  target=aarch64-apple-darwin
+  # A Rosetta shell reports x86_64 on Apple silicon, which takes the arm64 build.
+  if [ "$arch" = aarch64 ] || [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+    target=aarch64-apple-darwin
+  else
+    target=x86_64-apple-darwin
+  fi
 else
   if ls /lib/ld-musl-* >/dev/null 2>&1 || (ldd --version 2>&1 | grep -qi musl); then
     die "musl libc (Alpine and similar) is not supported yet; the preview needs glibc $GLIBC_MIN or newer"
@@ -62,6 +64,8 @@ curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "could not download $b
 # use opencode-native, also when the version is 0.0.0-rs-<run> (a client built from a commit before the rename).
 name=opencode-native
 grep -q "opencode-native-$version-$target.tar.gz" "$tmp/SHA256SUMS" || name=opencode-rs
+# A target that is new, or failed in this build, has no archive in it.
+grep -q "$name-$version-$target.tar.gz" "$tmp/SHA256SUMS" || die "v$version has no build for $target"
 archive=$name-$version-$target.tar.gz
 echo "Downloading opencode-native $version ($target)"
 curl -fsSL -o "$tmp/$archive" "$base/$archive" || die "could not download $base/$archive"

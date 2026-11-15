@@ -26,6 +26,9 @@ permissions:
 env:
   RUST_VERSION: "1.99.1"
   BUN_VERSION: "1.4.1"
+  # The third-party notice's generator (notices/about.toml), pinned with the sha256 of its release tarball.
+  CARGO_ABOUT_VERSION: "0.9.3"
+  CARGO_ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
   # The oldest TypeScript CLI the client is tested against (share-builds.md 1.2).
   OPENCODE_TS_MIN: "2.2.7"
   CARGO_TERM_COLOR: always
@@ -38,11 +41,16 @@ jobs:
       dev_base: ${{ steps.plan.outputs.dev_base }}
       opentui_rev: ${{ steps.plan.outputs.opentui_rev }}
       header_fnv1a64: ${{ steps.plan.outputs.header_fnv1a64 }}
+      opentui_release: ${{ steps.plan.outputs.opentui_release }}
       zig_version: ${{ steps.plan.outputs.zig_version }}
       skip: ${{ steps.plan.outputs.skip }}
       bin: ${{ steps.plan.outputs.bin }}
       version: ${{ steps.plan.outputs.version }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          path: preview
       - id: plan
         env:
           REF: ${{ inputs.ref || 'oc-rust' }}
@@ -60,6 +68,8 @@ jobs:
           hash=$(curl -fsSL "https://raw.githubusercontent.com/anomalyco/opentui/$rev/packages/rust/crates/opentui-sys/src/generated.rs" \
             | sed -nE 's/.*OPENTUI_HEADER_FNV1A64: u64 = (0x[0-9a-f_]+);.*/\1/p' | tr -d _)
           test -n "$hash"
+          # The OpenTUI release whose native zips carry the pin's header; none means a source build per target.
+          release=$("$GITHUB_WORKSPACE/preview/scripts/opentui-release.sh" tag "$hash")
           # The Zig that the pinned OpenTUI's native build asks for.
           zig=$(curl -fsSL "https://raw.githubusercontent.com/anomalyco/opentui/$rev/packages/native/build.zig.zon" \
             | sed -nE 's/.*\.minimum_zig_version = "([^"]+)".*/\1/p')
@@ -91,15 +101,62 @@ jobs:
             echo "dev_base=$dev_base"
             echo "opentui_rev=$rev"
             echo "header_fnv1a64=$hash"
+            echo "opentui_release=$release"
             echo "zig_version=$zig"
             echo "skip=$skip"
             echo "bin=$bin"
             echo "version=$version"
           } | tee -a "$GITHUB_OUTPUT"
-          echo "$REF -> $commit (dev base $dev_base), OpenTUI $rev ($hash, Zig $zig), binary $bin, version $version, skip=$skip" >> "$GITHUB_STEP_SUMMARY"
+          echo "$REF -> $commit (dev base $dev_base), OpenTUI $rev ($hash, Zig $zig, native ${release:-from source}), binary $bin, version $version, skip=$skip" >> "$GITHUB_STEP_SUMMARY"
+
+  # THIRD-PARTY-NOTICES.txt for every archive: the licences of the crates linked into the binary (the tree-sitter
+  # grammars among them), read from Cargo.lock by cargo-about, with notices/about.toml's allow-list.
+  notices:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: anomalyco/opencode
+          ref: ${{ needs.plan.outputs.commit }}
+          path: opencode
+          persist-credentials: false
+          sparse-checkout: packages/cli-rs
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - name: cargo-about
+        run: |
+          set -euo pipefail
+          name=cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$name.tar.gz"
+          echo "$CARGO_ABOUT_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+      - name: Generate
+        working-directory: opencode/packages/cli-rs
+        run: |
+          set -euo pipefail
+          # Every target's crates, so --frozen finds each licence file on disk and reads nothing from the network.
+          cargo fetch --locked
+          mkdir -p "$GITHUB_WORKSPACE/notices-out"
+          cargo-about generate --frozen -c "$GITHUB_WORKSPACE/notices/about.toml" -m crates/cli/Cargo.toml \
+            -o "$GITHUB_WORKSPACE/notices-out/THIRD-PARTY-NOTICES.txt" "$GITHUB_WORKSPACE/notices/about.hbs"
+          sed -n '/^Licences:/,/^$/p' "$GITHUB_WORKSPACE/notices-out/THIRD-PARTY-NOTICES.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notices
+          path: notices-out/
+          if-no-files-found: error
 
   build:
-    needs: plan
+    needs: [plan, notices]
     if: needs.plan.outputs.skip != 'true'
     strategy:
       fail-fast: false
@@ -114,12 +171,24 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-15
             lto: fat
+          # Cross-compiled on the arm64 runner and run under Rosetta 2. Optional until it has passed: a failure leaves
+          # its archive out of the release and fails nothing else.
+          - target: x86_64-apple-darwin
+            os: macos-15
+            lto: fat
+            run: arch -x86_64
+            optional: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
+    continue-on-error: ${{ matrix.optional == true }}
     env:
       TARGET: ${{ matrix.target }}
       BIN: ${{ needs.plan.outputs.bin }}
       VERSION: ${{ needs.plan.outputs.version }}
+      # How the runner starts the target's binary: through Rosetta for x86_64 macOS.
+      RUN: ${{ matrix.run }}
+      OPENTUI_RELEASE: ${{ needs.plan.outputs.opentui_release }}
+      HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -135,20 +204,26 @@ jobs:
             packages/cli-rs
             packages/ui/src/assets/audio
 
+      # The pin's OpenTUI release zip when one carries its header; else a source build, cached by pin and target.
+      - name: OpenTUI native library (release zip)
+        if: env.OPENTUI_RELEASE != ''
+        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
       - id: native-cache
+        if: env.OPENTUI_RELEASE == ''
         uses: actions/cache@v4
         with:
           path: native
-          key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v1
-      - if: steps.native-cache.outputs.cache-hit != 'true'
+          key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v2
+      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ needs.plan.outputs.zig_version }}
-      - if: steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - name: OpenTUI native library
+      - name: OpenTUI native library (source build)
+        if: env.OPENTUI_RELEASE == ''
         run: scripts/opentui-native.sh "$TARGET" native && cat native/STAMP
 
       - name: Rust
@@ -160,6 +235,12 @@ jobs:
           workspaces: opencode/packages/cli-rs -> target
           key: ${{ matrix.target }}-dist
           save-if: ${{ github.event_name == 'schedule' || github.ref == 'refs/heads/main' }}
+      - name: Rosetta 2
+        if: matrix.run == 'arch -x86_64'
+        run: |
+          # The arm64 image may come without it; the install is a no-op where it is present.
+          /usr/bin/pgrep -q oahd || softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 /usr/bin/true
 
       - name: Build
         working-directory: opencode/packages/cli-rs
@@ -201,7 +282,8 @@ jobs:
       - name: Smoke test
         run: |
           set -euo pipefail
-          out=$(stage/opencode-native --version)
+          file stage/opencode-native
+          out=$($RUN stage/opencode-native --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
           npm install -g "@opencode/cli@latest" >/dev/null
@@ -212,7 +294,7 @@ jobs:
           cd "$RUNNER_TEMP"
           stage=$GITHUB_WORKSPACE/stage/opencode-native
           # JSON, so an empty list still proves the service answered: the table prints nothing for none.
-          "$stage" session list --format json > session-list.txt 2>&1 &
+          $RUN "$stage" session list --format json > session-list.txt 2>&1 &
           pid=$!
           ( sleep 180; kill "$pid" 2>/dev/null ) &
           status=0
@@ -226,13 +308,23 @@ jobs:
           fi
           python3 -I -c 'import json, sys; assert isinstance(json.load(open(sys.argv[1])), list)' session-list.txt
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: notices
+          path: stage
       - name: Package
         run: |
           set -euo pipefail
+          # OpenCode's licence, the crates' notice, and OpenTUI's licence files (its own, FFmpeg's and the rest its
+          # library carries) from the zip or the source tree.
           cp opencode/LICENSE stage/
+          mkdir -p stage/licenses/opentui
+          cp native/licenses/* stage/licenses/opentui/
+          test -s stage/THIRD-PARTY-NOTICES.txt
           name=opencode-native-$VERSION-$TARGET
           mkdir -p dist
-          tar -czf "dist/$name.tar.gz" -C stage opencode-native LICENSE
+          tar -czf "dist/$name.tar.gz" -C stage opencode-native LICENSE THIRD-PARTY-NOTICES.txt licenses
+          tar -tzf "dist/$name.tar.gz"
           ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Debian package
         if: runner.os == 'Linux'
@@ -242,8 +334,13 @@ jobs:
           # Without a revision, so the release version with each - turned into ~ (0.0.0~native~12) is valid.
           debversion=${VERSION//-/\~}
           root=$RUNNER_TEMP/deb
-          mkdir -p "$root/DEBIAN" "$root/usr/bin"
+          doc=$root/usr/share/doc/opencode-native
+          mkdir -p "$root/DEBIAN" "$root/usr/bin" "$doc/licenses/opentui"
           install -m 755 stage/opencode-native "$root/usr/bin/opencode-native"
+          # Debian keeps a package's licences in its doc directory, OpenCode's as `copyright`.
+          install -m 644 stage/LICENSE "$doc/copyright"
+          install -m 644 stage/THIRD-PARTY-NOTICES.txt "$doc/THIRD-PARTY-NOTICES.txt"
+          install -m 644 stage/licenses/opentui/* "$doc/licenses/opentui/"
           cat > "$root/DEBIAN/control" <<EOF
           Package: opencode-native
           Version: $debversion
@@ -260,6 +357,7 @@ jobs:
           # the SHA256SUMS line.
           dpkg-deb --root-owner-group --build "$root" "dist/opencode-native_${VERSION}_$arch.deb"
           dpkg-deb --info "dist/opencode-native_${VERSION}_$arch.deb"
+          dpkg-deb --contents "dist/opencode-native_${VERSION}_$arch.deb"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
@@ -272,13 +370,20 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # FFmpeg does not build on Windows hosts, so the Windows library is cross-built here.
+  # The Windows libraries, from the pin's OpenTUI release zip or cross-built here: FFmpeg does not build on Windows
+  # hosts.
   native-windows:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
     runs-on: ubuntu-22.04
     env:
-      TARGET: x86_64-pc-windows-msvc
+      TARGET: ${{ matrix.target }}
+      OPENTUI_RELEASE: ${{ needs.plan.outputs.opentui_release }}
+      HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -290,34 +395,51 @@ jobs:
           path: opencode
           persist-credentials: false
           sparse-checkout: packages/cli-rs
+      - name: OpenTUI native library (release zip)
+        if: env.OPENTUI_RELEASE != ''
+        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
       - id: native-cache
+        if: env.OPENTUI_RELEASE == ''
         uses: actions/cache@v4
         with:
           path: native
-          key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-x86_64-pc-windows-msvc-v1
-      - if: steps.native-cache.outputs.cache-hit != 'true'
+          key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v2
+      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ needs.plan.outputs.zig_version }}
-      - if: steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - run: scripts/opentui-native.sh "$TARGET" native && cat native/STAMP
+      - name: OpenTUI native library (source build)
+        if: env.OPENTUI_RELEASE == ''
+        run: scripts/opentui-native.sh "$TARGET" native && cat native/STAMP
       - uses: actions/upload-artifact@v4
         with:
-          name: native-x86_64-pc-windows-msvc
+          name: native-${{ matrix.target }}
           path: native/
           if-no-files-found: error
 
-  # The Windows build and its smoke tests (W10). Its zip goes into the release with the other archives (W12).
+  # The Windows builds and their smoke tests (W10). Their zips go into the release with the other archives (W12).
   windows:
-    needs: [plan, native-windows]
+    needs: [plan, notices, native-windows]
     if: needs.plan.outputs.skip != 'true'
-    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+          # Optional until it has passed: a failure leaves its zip out of the release and fails nothing else.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            optional: true
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 150
+    continue-on-error: ${{ matrix.optional == true }}
     env:
-      TARGET: x86_64-pc-windows-msvc
+      TARGET: ${{ matrix.target }}
       BIN: ${{ needs.plan.outputs.bin }}
       VERSION: ${{ needs.plan.outputs.version }}
     defaults:
@@ -335,12 +457,28 @@ jobs:
             packages/ui/src/assets/audio
       - uses: actions/download-artifact@v5
         with:
-          name: native-x86_64-pc-windows-msvc
+          name: native-${{ matrix.target }}
           path: native
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
           rustup default "$RUST_VERSION"
+      - name: Clang (ring)
+        # ring builds its C and assembly for aarch64-pc-windows-msvc with clang only (D85); cl.exe serves the rest.
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $clang = Get-Command clang -ErrorAction SilentlyContinue
+          if (-not $clang) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $dirs = @("$env:ProgramFiles\LLVM\bin") + @(& $vswhere -latest -products * -find 'VC\Tools\Llvm\ARM64\bin')
+            $dir = $dirs | Where-Object { $_ -and (Test-Path (Join-Path $_ 'clang.exe')) } | Select-Object -First 1
+            if (-not $dir) { throw 'no clang.exe: neither on PATH, in LLVM nor in Visual Studio' }
+            $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+            $clang = Join-Path $dir 'clang.exe'
+          }
+          & $clang --version | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: opencode/packages/cli-rs -> target
@@ -355,24 +493,28 @@ jobs:
           OPENCODE_RS_COMMIT: ${{ needs.plan.outputs.commit }}
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --locked --profile dist --target "$TARGET" --bin "$BIN"
+      - uses: actions/download-artifact@v5
+        with:
+          name: notices
+          path: stage
       - name: Package and smoke test
         id: package
         run: |
           set -euo pipefail
-          mkdir -p stage dist debug
+          mkdir -p stage/licenses/opentui dist debug
           cp "opencode/packages/cli-rs/target/$TARGET/dist/$BIN.exe" stage/opencode-native.exe
           cp native/opentui.dll opencode/LICENSE stage/
+          # The crates' notice, and OpenTUI's licence files (its own, FFmpeg's and the rest opentui.dll carries).
+          cp native/licenses/* stage/licenses/opentui/
+          test -s stage/THIRD-PARTY-NOTICES.txt
           cp "opencode/packages/cli-rs/target/$TARGET/dist/${BIN//-/_}.pdb" debug/opencode_native.pdb || true
           out=$(stage/opencode-native.exe --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
-          (cd stage && 7z a -tzip "../dist/opencode-native-$VERSION-$TARGET.zip" opencode-native.exe opentui.dll LICENSE >/dev/null)
+          (cd stage && 7z a -tzip "../dist/opencode-native-$VERSION-$TARGET.zip" opencode-native.exe opentui.dll LICENSE \
+            THIRD-PARTY-NOTICES.txt licenses >/dev/null)
+          7z l "dist/opencode-native-$VERSION-$TARGET.zip"
           ls -l stage dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ env.TARGET }}
-          path: dist/
-          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: debug-${{ env.TARGET }}
@@ -397,8 +539,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          # The runner's own host tools (Hostx64 on windows-2025, HostARM64 on windows-11-arm); either target's dumpbin
+          # reads either machine's executable.
+          $tools = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'HostARM64' } else { 'Hostx64' }
+          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\*\bin\$tools\*\dumpbin.exe" | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe not found' }
           $text = & $dumpbin /nologo /dependents stage\opencode-native.exe
           $text
@@ -520,10 +664,18 @@ jobs:
           cargo test --locked --target $env:TARGET -p opencode-cli --test windows_smoke -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "windows_smoke failed ($LASTEXITCODE)" }
 
+      # After every smoke passed, so a zip that failed one never reaches the release (an optional target's job does not
+      # fail it).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ env.TARGET }}
+          path: dist/
+          if-no-files-found: error
+
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-smoke-c.p
+          name: windows-smoke-${{ matrix.target }}
           path: ${{ runner.temp }}\smoke
           if-no-files-found: ignore
 
@@ -591,7 +743,8 @@ jobs:
           path: ${{ runner.temp }}/test/
           if-no-files-found: ignore
 
-  # Only main publishes; a branch's run stops before this job.
+  # Only main publishes; a branch's run stops before this job. An optional target that failed has uploaded no dist-*,
+  # so its archive is left out.
   release:
     needs: [plan, build, windows, windows-test]
     if: needs.plan.outputs.skip != 'true' && github.ref == 'refs/heads/main'
