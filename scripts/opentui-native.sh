@@ -34,8 +34,9 @@ case $target in
   aarch64-apple-darwin) zig_target=aarch64-macos.13.0 name=aarch64-macos files="opentui.h libopentui.a libopentui.dylib" ;;
   x86_64-apple-darwin) zig_target=x86_64-macos.13.0 name=x86_64-macos files="opentui.h libopentui.a libopentui.dylib" ;;
   # D85: Windows links opentui.dll through its import library, with or without the static feature.
-  x86_64-pc-windows-msvc) zig_target=x86_64-windows-gnu name=x86_64-windows files="opentui.h opentui.dll opentui.lib" ;;
-  aarch64-pc-windows-msvc) zig_target=aarch64-windows-gnu name=aarch64-windows files="opentui.h opentui.dll opentui.lib" ;;
+  # A pin with OpenTUI #2140 also builds opentui-static.lib, which its opentui-sys links on MSVC instead of the DLL.
+  x86_64-pc-windows-msvc) zig_target=x86_64-windows-gnu name=x86_64-windows files="opentui.h opentui.dll opentui.lib" optional=opentui-static.lib ;;
+  aarch64-pc-windows-msvc) zig_target=aarch64-windows-gnu name=aarch64-windows files="opentui.h opentui.dll opentui.lib" optional=opentui-static.lib ;;
   *) die "unsupported target $target" ;;
 esac
 
@@ -117,6 +118,9 @@ lib=$native/lib/$name
 built=$(fnv1a64 "$lib/opentui.h")
 [ "$built" = "$expected" ] || die "built $lib/opentui.h hashes to $built, not $expected"
 for f in $files; do [ -f "$lib/$f" ] || die "the build made no $f; $lib has: $(ls "$lib" | tr '\n' ' ')"; done
+for f in ${optional:-}; do
+  if [ -f "$lib/$f" ]; then files="$files $f"; fi
+done
 for pair in $licenses; do [ -f "$src/${pair#*:}" ] || die "$rev has no ${pair#*:}"; done
 
 rm -rf "$out"

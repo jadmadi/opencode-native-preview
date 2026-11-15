@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 # OpenTUI's native library for one Rust target from an OpenTUI release zip, instead of a source build.
 #
-# Usage: scripts/opentui-release.sh tag <header-fnv1a64>
-#          Prints the release whose opentui.h hashes to <header-fnv1a64> (the pin's OPENTUI_HEADER_FNV1A64), or
-#          nothing when no release in the table below has it: then build from source (scripts/opentui-native.sh).
+# Usage: scripts/opentui-release.sh tag <header-fnv1a64> <pin-commit>
+#          Prints the release whose zips hold what the pin builds: its opentui.h hashes to <header-fnv1a64> (the pin's
+#          OPENTUI_HEADER_FNV1A64), and the pin's packages/native is the release commit's apart from the version in
+#          package.json and build.zig.zon. Prints nothing when no release in the tables below qualifies; then build
+#          from source (scripts/opentui-native.sh). The header alone is not enough: a pin after a release can change
+#          a library and not the header (#2140 changed opentui-static.lib under v0.9.0's header).
 #        scripts/opentui-release.sh fetch <tag> <rust-target> <out-dir> <header-fnv1a64>
 #          Downloads opentui-native-<tag>-<platform>.zip, checks it against its sha256 below and its opentui.h
 #          against <header-fnv1a64>, and installs opentui.h, the libraries opentui-sys reads, every licence and
 #          source-notice file the zip ships (under <out-dir>/licenses) and STAMP into <out-dir>.
 #
 # The zips carry no attestation, so the sha256 table is the control: add a release's rows from
-# `gh release view <tag> -R anomalyco/opentui --json assets` in the change that moves to it, after checking that its
-# header is the pin's.
+# `gh release view <tag> -R anomalyco/opentui --json assets`, and its commit to the releases table, in the change that
+# moves to it.
 set -euo pipefail
 
 die() { echo "opentui-release: $*" >&2; exit 1; }
+
+# tag, and the commit its zips were built from.
+releases() {
+  cat <<'EOF'
+v0.9.0 0c48678dddcc6a371c0783f26735f5ed788f8ccb
+EOF
+}
 
 # tag, header FNV-1a 64 of its opentui.h, platform, sha256 of opentui-native-<tag>-<platform>.zip.
 table() {
@@ -44,14 +54,41 @@ for b in open(sys.argv[1], "rb").read():
 print(f"{h:#018x}")' "$1"
 }
 
+# Whether packages/native, which the zips are built from, is the same at commits $1 and $2, apart from the version
+# that a release commit bumps in package.json and build.zig.zon. Trees only: a blobless fetch, two blobs read on demand.
+same_native() {
+  local repo same=0
+  repo=$(mktemp -d)
+  git init -q "$repo"
+  git -C "$repo" remote add origin https://github.com/anomalyco/opentui
+  git -C "$repo" fetch -q --depth 1 --filter=blob:none origin "$1" "$2"
+  git -C "$repo" diff --quiet "$1" "$2" -- packages/native ':!packages/native/package.json' \
+    ':!packages/native/build.zig.zon' || same=1
+  if [ "$same" = 0 ]; then
+    zon() { git -C "$repo" show "$1:packages/native/build.zig.zon" | grep -v '^ *\.version *='; }
+    [ "$(zon "$1")" = "$(zon "$2")" ] || same=1
+  fi
+  rm -rf "$repo"
+  return "$same"
+}
+
 sha256() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
 case ${1:-} in
   tag)
-    [ $# -eq 2 ] || die "usage: $0 tag <header-fnv1a64>"
-    table | awk -v header="$2" '$2 == header { print $1; exit }'
+    [ $# -eq 3 ] || die "usage: $0 tag <header-fnv1a64> <pin-commit>"
+    header=$2 pin=$3
+    for tag in $(table | awk -v header="$header" '$2 == header { print $1 }' | uniq); do
+      commit=$(releases | awk -v tag="$tag" '$1 == tag { print $2 }')
+      [ -n "$commit" ] || die "no commit for $tag in the releases table"
+      if same_native "$commit" "$pin"; then
+        echo "$tag"
+        exit 0
+      fi
+      echo "opentui-release: $tag ($commit) has the pin's header, but its packages/native differs from $pin's" >&2
+    done
     ;;
   fetch)
     [ $# -eq 5 ] || die "usage: $0 fetch <tag> <rust-target> <out-dir> <header-fnv1a64>"
@@ -107,5 +144,5 @@ header_fnv1a64=$built
 EOF
     echo "opentui-release: installed $files and licenses/ ($(printf '%s' "$notices" | tr '\n' ' ')) from $name into $out"
     ;;
-  *) die "usage: $0 tag <header-fnv1a64> | fetch <tag> <rust-target> <out-dir> <header-fnv1a64>" ;;
+  *) die "usage: $0 tag <header-fnv1a64> <pin-commit> | fetch <tag> <rust-target> <out-dir> <header-fnv1a64>" ;;
 esac
