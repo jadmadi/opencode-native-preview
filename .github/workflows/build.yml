@@ -3,7 +3,8 @@ name: build
 # Builds opencode-native, the OpenCode native CLI (packages/cli-rs of anomalyco/opencode), at `ref` for each preview
 # platform and
 # publishes one prerelease per build. The nightly run skips when `oc-rust` has not moved since the
-# last release.
+# last release. Only a run of `main` publishes: a run dispatched on another branch builds, tests and smokes the same
+# way and keeps its archives as artifacts.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -14,8 +15,9 @@ on:
         default: oc-rust
         required: true
 
+# One group per branch: a newer run cancels an older one of the same branch, never main's.
 concurrency:
-  group: build
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -589,9 +591,10 @@ jobs:
           path: ${{ runner.temp }}/test/
           if-no-files-found: ignore
 
+  # Only main publishes; a branch's run stops before this job.
   release:
     needs: [plan, build, windows, windows-test]
-    if: needs.plan.outputs.skip != 'true'
+    if: needs.plan.outputs.skip != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
