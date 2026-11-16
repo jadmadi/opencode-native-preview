@@ -3,14 +3,17 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/simonklee/opencode-native-preview/main/install.sh | bash
 #
-# Installs the newest prerelease of simonklee/opencode-native-preview into ~/.local/bin/opencode-native, or into
-# $OPENCODE_NATIVE_INSTALL_DIR. Set OPENCODE_NATIVE_VERSION (for example 0.0.0-native-12) to install that build.
+# Installs the newest prerelease of simonklee/opencode-native-preview: opencode-native and the TypeScript opencode
+# server it runs into ~/.local/lib/opencode-native (or $OPENCODE_NATIVE_LIB_DIR), and a link to opencode-native in
+# ~/.local/bin (or $OPENCODE_NATIVE_INSTALL_DIR). The bundled opencode stays off PATH, so it never shadows your own.
+# Set OPENCODE_NATIVE_VERSION (for example 0.0.0-native-12) to install that build.
 set -euo pipefail
 
 REPO=simonklee/opencode-native-preview
 TS_MIN=2.2.7
 GLIBC_MIN=2.17
 dir=${OPENCODE_NATIVE_INSTALL_DIR:-${OPENCODE_RS_INSTALL_DIR:-$HOME/.local/bin}} # the second name is the old one
+lib=${OPENCODE_NATIVE_LIB_DIR:-$HOME/.local/lib/opencode-native}
 
 die() { printf 'opencode-native install: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -81,13 +84,34 @@ else
 fi
 [ "$actual" = "$expected" ] || die "checksum mismatch for $archive: got $actual, expected $expected"
 
-tar -xzf "$tmp/$archive" -C "$tmp" "$name"
-mkdir -p "$dir"
-# Replace by rename, so a running opencode-native keeps its old file.
-cp "$tmp/$name" "$dir/.opencode-native.new"
-chmod 755 "$dir/.opencode-native.new"
-mv -f "$dir/.opencode-native.new" "$dir/opencode-native"
-echo "Installed $("$dir/opencode-native" --version 2>/dev/null || echo "opencode-native $version") to $dir/opencode-native"
+# Builds since bundle-server carry the TypeScript server beside the client; older ones carry the client alone.
+bundled=false
+listing=$(tar -tzf "$tmp/$archive")
+grep -qx opencode <<<"$listing" && bundled=true
+if [ "$bundled" = true ]; then
+  tar -xzf "$tmp/$archive" -C "$tmp" "$name" opencode
+else
+  tar -xzf "$tmp/$archive" -C "$tmp" "$name"
+fi
+mkdir -p "$dir" "$lib"
+# Replace by rename, so a running opencode-native, and a running service, keep their old files.
+install_file() { # install_file <source> <target>
+  cp "$1" "$2.new"
+  chmod 755 "$2.new"
+  mv -f "$2.new" "$2"
+}
+if [ "$bundled" = true ]; then
+  install_file "$tmp/opencode" "$lib/opencode"
+  install_file "$tmp/$name" "$lib/opencode-native"
+  # The link on PATH; the client finds the bundled server beside the link's target.
+  ln -sfn "$lib/opencode-native" "$dir/.opencode-native.new"
+  mv -f "$dir/.opencode-native.new" "$dir/opencode-native"
+  echo "Installed $("$dir/opencode-native" --version 2>/dev/null || echo "opencode-native $version") and its server to $lib"
+  echo "Linked $dir/opencode-native"
+else
+  install_file "$tmp/$name" "$dir/opencode-native"
+  echo "Installed $("$dir/opencode-native" --version 2>/dev/null || echo "opencode-native $version") to $dir/opencode-native"
+fi
 if [ -e "$dir/opencode-rs" ]; then
   echo "The client is now called opencode-native; you can remove the old $dir/opencode-rs."
 fi
@@ -97,9 +121,22 @@ case ":$PATH:" in
   *) warn "$dir is not on PATH; add it, or run $dir/opencode-native" ;;
 esac
 
-# The client runs the TypeScript opencode for its server.
+if [ "$bundled" = true ]; then
+  # Bun's musl build, the bundled server's, needs libstdc++ and libgcc, as OpenCode's own Docker image installs them.
+  case $target in
+    *-musl)
+      if ! ls /usr/lib/libstdc++.so.6 /lib/libstdc++.so.6 >/dev/null 2>&1; then
+        warn "the bundled server needs libstdc++ and libgcc; install them with: apk add libstdc++ libgcc"
+      fi
+      ;;
+  esac
+  # A service of the previous build keeps running until the next start of the TUI restarts it on this build.
+  exit 0
+fi
+
+# A build without the server runs the TypeScript opencode on PATH for it.
 if ! command -v opencode >/dev/null; then
-  warn "opencode (the TypeScript CLI) is not on PATH; opencode-native needs it. Install it with: npm i -g @opencode/cli"
+  warn "opencode (the TypeScript CLI) is not on PATH; this build of opencode-native needs it. Install it with: npm i -g @opencode/cli"
 else
   ts=$(opencode --version 2>/dev/null | head -n 1 | awk '{print $NF}')
   ts=${ts#v}

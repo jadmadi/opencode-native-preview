@@ -1,7 +1,7 @@
 name: build
 
 # Builds opencode-native, the OpenCode native CLI (packages/cli-rs of anomalyco/opencode), at `ref` for each preview
-# platform and
+# platform, with the TypeScript opencode server built from the same commit bundled beside it (ts-cli), and
 # publishes one prerelease per build. The nightly run skips when `oc-rust` has not moved since the
 # last release. Only a run of `main` publishes: a run dispatched on another branch builds, tests and smokes the same
 # way and keeps its archives as artifacts.
@@ -29,8 +29,6 @@ env:
   # The third-party notice's generator (notices/about.toml), pinned with the sha256 of its release tarball.
   CARGO_ABOUT_VERSION: "0.9.3"
   CARGO_ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
-  # The oldest TypeScript CLI the client is tested against (share-builds.md 1.2).
-  OPENCODE_TS_MIN: "2.2.7"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -186,6 +184,82 @@ jobs:
           path: notices-out/
           if-no-files-found: error
 
+  # The TypeScript CLI each archive bundles beside opencode-native (bundle-server): packages/cli's own build from the
+  # same commit at the same version, one target per leg, cross-compiled by Bun on Linux as OpenCode's build-cli does.
+  # x64 takes the baseline build, as Desktop does. Channel `latest`, the client's when OPENCODE_CHANNEL is unset, so both
+  # use service.json.
+  ts-cli:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            ts: linux-x64-baseline
+          - target: aarch64-unknown-linux-gnu
+            ts: linux-arm64
+          - target: x86_64-unknown-linux-musl
+            ts: linux-x64-baseline-musl
+          - target: aarch64-unknown-linux-musl
+            ts: linux-arm64-musl
+          - target: aarch64-apple-darwin
+            ts: darwin-arm64
+          - target: x86_64-apple-darwin
+            ts: darwin-x64-baseline
+          - target: x86_64-pc-windows-msvc
+            ts: windows-x64-baseline
+          - target: aarch64-pc-windows-msvc
+            ts: windows-arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: anomalyco/opencode
+          ref: ${{ needs.plan.outputs.commit }}
+          path: opencode
+          persist-credentials: false
+      # The Bun the repository pins (package.json packageManager), which its build checks.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: opencode/package.json
+      - name: Install
+        working-directory: opencode
+        run: bun install --frozen-lockfile
+      - name: Build
+        working-directory: opencode/packages/cli
+        env:
+          OPENCODE_TARGET: ${{ matrix.ts }}
+          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
+          OPENCODE_CHANNEL: latest
+          # Read-only; raises the rate limit for the Bun release download.
+          GH_TOKEN: ${{ github.token }}
+          TS: ${{ matrix.ts }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          bun=$(jq -r .packageManager ../../package.json)
+          start=$(date +%s)
+          # The Bun release the executable embeds, the one the repository pins, as release.yml's build-cli sets it.
+          BUN_COMPILE_RELEASE=bun-v${bun#bun@} bun run script/build.ts
+          echo "build ($TS): $(( $(date +%s) - start )) s" | tee -a "$GITHUB_STEP_SUMMARY"
+          exe=opencode
+          case $TS in windows-*) exe=opencode.exe ;; esac
+          mkdir -p "$GITHUB_WORKSPACE/ts-cli"
+          cp "dist/cli-$TS/bin/$exe" "$GITHUB_WORKSPACE/ts-cli/$exe"
+          echo "$exe: $(wc -c < "$GITHUB_WORKSPACE/ts-cli/$exe") bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$TS" = linux-x64-baseline ]; then
+            out=$("$GITHUB_WORKSPACE/ts-cli/$exe" --version)
+            echo "$out"
+            case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ts-cli-${{ matrix.target }}
+          path: ts-cli/
+          if-no-files-found: error
+
   # RustSec advisories against the crates the client links, read from packages/cli-rs/deny.toml and the database. A new
   # one fails this job and so blocks the release; a commit from before the policy has none to check and still publishes.
   advisories:
@@ -215,7 +289,7 @@ jobs:
           cargo deny --workspace --locked check --hide-inclusion-graph advisories
 
   build:
-    needs: [plan, notices]
+    needs: [plan, notices, ts-cli]
     if: needs.plan.outputs.skip != 'true'
     strategy:
       fail-fast: false
@@ -374,40 +448,44 @@ jobs:
             objcopy --add-gnu-debuglink=debug/opencode-native.debug stage/opencode-native
           fi
           ls -l "$bin" stage/opencode-native | tee -a "$GITHUB_STEP_SUMMARY"
+      # The TypeScript server built from the same commit (ts-cli), beside the client in every archive (bundle-server).
+      - uses: actions/download-artifact@v5
+        with:
+          name: ts-cli-${{ matrix.target }}
+          path: stage
+      - name: Bundled server
+        run: |
+          set -euo pipefail
+          # Artifacts drop the mode bits.
+          chmod 755 stage/opencode
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Ad hoc, as opencode-native is and as Desktop signs its copy: no hardened runtime, so Bun's JIT needs no
+            # entitlement, and arm64 macOS runs only signed code.
+            codesign --force --sign - stage/opencode
+            codesign --verify --verbose=2 stage/opencode
+          fi
+          echo "bundled opencode: $(wc -c < stage/opencode) bytes" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Linux floor
         if: env.LIBC != ''
-        run: scripts/check-linux.sh stage/opencode-native "$LIBC" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -euo pipefail
+          scripts/check-linux.sh stage/opencode-native "$LIBC" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Bun's glibc build keeps the same floor; its musl build needs libstdc++ and libgcc (the Alpine smoke adds
+          # them, as OpenCode's Docker image does), so only the gnu one is held to it.
+          if [ "$LIBC" = gnu ]; then scripts/check-linux.sh stage/opencode gnu | tee -a "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Smoke test
-        # A musl binary needs musl's loader, which the runner lacks: its smoke runs in Alpine below.
+        # A musl binary needs musl's loader, which the runner lacks: its smoke runs in Alpine below. A fresh box: no
+        # other opencode on PATH, the bundled server for the service, a mock provider for a session, and a TypeScript
+        # TUI plugin on the bundled Bun (scripts/smoke-bundle.sh).
         if: env.LIBC != 'musl'
         run: |
           set -euo pipefail
-          file stage/opencode-native
+          file stage/opencode-native stage/opencode
           out=$($RUN stage/opencode-native --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
-          npm install -g "@opencode/cli@latest" >/dev/null
-          echo "TypeScript CLI: $(opencode --version)"
-          export HOME=$RUNNER_TEMP/home XDG_CONFIG_HOME=$RUNNER_TEMP/home/.config XDG_DATA_HOME=$RUNNER_TEMP/home/.local/share \
-            XDG_STATE_HOME=$RUNNER_TEMP/home/.local/state XDG_CACHE_HOME=$RUNNER_TEMP/home/.cache
-          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
-          cd "$RUNNER_TEMP"
-          stage=$GITHUB_WORKSPACE/stage/opencode-native
-          # JSON, so an empty list still proves the service answered: the table prints nothing for none.
-          $RUN "$stage" session list --format json > session-list.txt 2>&1 &
-          pid=$!
-          ( sleep 180; kill "$pid" 2>/dev/null ) &
-          status=0
-          wait "$pid" || status=$?
-          cat session-list.txt
-          pkill -f 'serve --service' || true
-          if [ "$status" -ne 0 ]; then
-            echo "session list exited $status"
-            find "$HOME" -name '*.log' -exec sh -c 'echo "== $1"; tail -n 60 "$1"' _ {} \;
-            exit 1
-          fi
-          python3 -I -c 'import json, sys; assert isinstance(json.load(open(sys.argv[1])), list)' session-list.txt
+          scripts/smoke-bundle.sh stage | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Sample plugin
         # An in-repo native plugin, linked as the client is, for the floor's smoke: it loads through dlopen.
         if: env.LIBC != ''
@@ -415,36 +493,41 @@ jobs:
         run: |
           set -euo pipefail
           cargo zigbuild --locked --release --manifest-path crates/plugin/examples/sample/Cargo.toml --target "$ZIG_TARGET"
-          mkdir -p "$RUNNER_TEMP/smoke"
+          mkdir -p "$RUNNER_TEMP/smoke/bundle"
           cp "crates/plugin/examples/sample/target/$TARGET/release/libopencode_sample_plugin.so" "$RUNNER_TEMP/smoke/plugin.so"
-          cp "$GITHUB_WORKSPACE/stage/opencode-native" "$RUNNER_TEMP/smoke/"
+          cp "$GITHUB_WORKSPACE/stage/opencode-native" "$GITHUB_WORKSPACE/stage/opencode" "$RUNNER_TEMP/smoke/bundle/"
+          cp -r "$GITHUB_WORKSPACE/scripts" "$GITHUB_WORKSPACE/bench" "$RUNNER_TEMP/smoke/"
       - name: Smoke test on the floor (CentOS 7, glibc 2.17)
+        # The client and its bundled server on glibc 2.17: the service starts from the bundled binary.
         if: env.LIBC == 'gnu'
         run: |
           set -euo pipefail
           out=$(docker run --rm -e HOME=/tmp -e TMPDIR=/tmp -v "$RUNNER_TEMP/smoke:/work:ro" centos:7 sh -euc '
             ldd --version | head -n 1
-            /work/opencode-native --version
-            /work/opencode-native plugin test /work/plugin.so')
+            /work/bundle/opencode-native --version
+            /work/bundle/opencode-native plugin test /work/plugin.so
+            /work/bundle/opencode --version
+            mkdir -p /tmp/project && cd /tmp/project
+            timeout 180 /work/bundle/opencode-native session list --format json > /tmp/sessions.json
+            /work/bundle/opencode-native service stop
+            cat /tmp/sessions.json')
           echo "$out"
-          case $out in *"$VERSION"*"sample plugin v1"*) ;; *) echo "no version or no plugin frame"; exit 1 ;; esac
+          case $out in *"$VERSION"*"sample plugin v1"*"opencode v$VERSION"*) ;; *) echo "no version, plugin frame or bundled server"; exit 1 ;; esac
+          [ "$(tail -n 1 <<<"$out" | head -c 1)" = "[" ] || { echo "session list printed no JSON array"; exit 1; }
       - name: Smoke test on the floor (Alpine, musl)
-        # A bare Alpine: musl alone, then the TypeScript CLI's musl build for the service.
+        # A bare Alpine runs the client on musl alone; the bundled server's Bun needs libstdc++ and libgcc, which
+        # OpenCode's Docker image adds too. Then the bundle's smoke test, as on the other legs.
         if: env.LIBC == 'musl'
         run: |
           set -euo pipefail
           out=$(docker run --rm -e HOME=/tmp -e TMPDIR=/tmp -v "$RUNNER_TEMP/smoke:/work:ro" alpine:3.22 sh -euc '
             cat /etc/alpine-release
-            /work/opencode-native --version
-            /work/opencode-native plugin test /work/plugin.so
-            apk add --no-cache nodejs npm >/dev/null
-            npm install -g "@opencode/cli@latest" >/dev/null
-            echo "TypeScript CLI: $(opencode --version)"
-            timeout 180 /work/opencode-native session list --format json > /tmp/sessions.json
-            cat /tmp/sessions.json')
+            /work/bundle/opencode-native --version
+            /work/bundle/opencode-native plugin test /work/plugin.so
+            apk add --no-cache libgcc libstdc++ bash python3 >/dev/null
+            bash /work/scripts/smoke-bundle.sh /work/bundle')
           echo "$out"
-          case $out in *"$VERSION"*"sample plugin v1"*"TypeScript CLI"*) ;; *) echo "no version, plugin frame or service"; exit 1 ;; esac
-          [ "$(tail -n 1 <<<"$out" | head -c 1)" = "[" ] || { echo "session list printed no JSON array"; exit 1; }
+          case $out in *"$VERSION"*"sample plugin v1"*"smoke: ok"*) ;; *) echo "no version, plugin frame or bundle smoke"; exit 1 ;; esac
 
       - uses: actions/download-artifact@v5
         with:
@@ -461,7 +544,7 @@ jobs:
           test -s stage/THIRD-PARTY-NOTICES.txt
           name=opencode-native-$VERSION-$TARGET
           mkdir -p dist
-          tar -czf "dist/$name.tar.gz" -C stage opencode-native LICENSE THIRD-PARTY-NOTICES.txt licenses
+          tar -czf "dist/$name.tar.gz" -C stage opencode-native opencode LICENSE THIRD-PARTY-NOTICES.txt licenses
           tar -tzf "dist/$name.tar.gz"
           ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Debian package
@@ -474,8 +557,13 @@ jobs:
           debversion=${VERSION//-/\~}
           root=$RUNNER_TEMP/deb
           doc=$root/usr/share/doc/opencode-native
-          mkdir -p "$root/DEBIAN" "$root/usr/bin" "$doc/licenses/opentui"
-          install -m 755 stage/opencode-native "$root/usr/bin/opencode-native"
+          # Both binaries in a private directory, so the bundled opencode stays off PATH and never shadows the user's;
+          # the client finds it beside its own real path.
+          lib=$root/usr/lib/opencode-native
+          mkdir -p "$root/DEBIAN" "$root/usr/bin" "$lib" "$doc/licenses/opentui"
+          install -m 755 stage/opencode-native "$lib/opencode-native"
+          install -m 755 stage/opencode "$lib/opencode"
+          ln -s ../lib/opencode-native/opencode-native "$root/usr/bin/opencode-native"
           # Debian keeps a package's licences in its doc directory, OpenCode's as `copyright`.
           install -m 644 stage/LICENSE "$doc/copyright"
           install -m 644 stage/THIRD-PARTY-NOTICES.txt "$doc/THIRD-PARTY-NOTICES.txt"
@@ -490,7 +578,7 @@ jobs:
           Priority: optional
           Homepage: https://github.com/$GITHUB_REPOSITORY
           Description: OpenCode native CLI (preview)
-           A Rust client for OpenCode. Needs the TypeScript opencode 2.2.7 or newer.
+           A Rust client for OpenCode, with the TypeScript opencode server it runs, built from the same commit.
           EOF
           # The file name keeps the release version: GitHub turns ~ into . in asset names, which would no longer match
           # the SHA256SUMS line.
@@ -570,7 +658,7 @@ jobs:
 
   # The Windows builds and their smoke tests (W10). Their zips go into the release with the other archives (W12).
   windows:
-    needs: [plan, notices, native-windows]
+    needs: [plan, notices, native-windows, ts-cli]
     if: needs.plan.outputs.skip != 'true'
     strategy:
       fail-fast: false
@@ -593,6 +681,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # The preview repository, for the mock provider of Smoke 4.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          path: preview
       - uses: actions/checkout@v5
         with:
           repository: anomalyco/opencode
@@ -606,6 +699,11 @@ jobs:
         with:
           name: native-${{ matrix.target }}
           path: native
+      # The TypeScript server built from the same commit (ts-cli), beside the client in the zip (bundle-server).
+      - uses: actions/download-artifact@v5
+        with:
+          name: ts-cli-${{ matrix.target }}
+          path: stage
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
@@ -679,7 +777,8 @@ jobs:
           mkdir -p stage/licenses/opentui dist debug
           cp "opencode/packages/cli-rs/target/$TARGET/dist/$BIN.exe" stage/opencode-native.exe
           cp opencode/LICENSE stage/
-          files=(opencode-native.exe LICENSE THIRD-PARTY-NOTICES.txt licenses)
+          test -s stage/opencode.exe
+          files=(opencode-native.exe opencode.exe LICENSE THIRD-PARTY-NOTICES.txt licenses)
           if [ "$LAYOUT" = dll ]; then
             cp native/opentui.dll stage/
             files+=(opentui.dll)
@@ -692,6 +791,9 @@ jobs:
           out=$(stage/opencode-native.exe --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
+          out=$(stage/opencode.exe --version)
+          echo "bundled: $out"
+          case $out in *"$VERSION"*) ;; *) echo "the bundled opencode.exe printed '$out', not $VERSION"; exit 1 ;; esac
           (cd stage && 7z a -tzip "../dist/opencode-native-$VERSION-$TARGET.zip" "${files[@]}" >/dev/null)
           7z l "dist/opencode-native-$VERSION-$TARGET.zip"
           ls -l stage dist
@@ -758,15 +860,17 @@ jobs:
           if ($env:LAYOUT -eq 'dll' -and $code -ne 'C0000135') { throw "expected 0xC0000135 (STATUS_DLL_NOT_FOUND), got 0x$code" }
           if ($env:LAYOUT -eq 'static' -and $code -ne '00000000') { throw "the one-file .exe exited 0x$code" }
 
-      - name: Smoke 4 - TS opencode, session list, service stop (W5)
+      - name: Smoke 4 - bundled server, a session on a mock provider, service stop (W5)
+        # A fresh box: no opencode on PATH. The client starts its service from the bundled opencode.exe, a session gets
+        # the mock provider's reply (the mock runs on the bundled binary as Bun), and service stop ends it. The TUI
+        # plugin step of scripts/smoke-bundle.sh needs a pty and is not run here.
         # Each smoke runs once the package exists, also after an earlier smoke failed.
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          npm install -g "@opencode/cli@latest" | Out-Null
-          "TypeScript CLI: $(opencode --version)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
-          "where opencode: $((where.exe opencode) -join ', ')" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $found = Get-Command opencode -ErrorAction SilentlyContinue
+          if ($found) { throw "an opencode is on PATH ($($found.Source)); the smoke needs a box without one" }
           $root = Join-Path $env:RUNNER_TEMP 'home'
           $env:USERPROFILE = $root
           $env:HOME = $root
@@ -778,7 +882,10 @@ jobs:
             New-Item -ItemType Directory -Force $d | Out-Null
           }
           $exe = Join-Path $env:GITHUB_WORKSPACE 'stage\opencode-native.exe'
-          Set-Location $env:RUNNER_TEMP
+          $ts = Join-Path $env:GITHUB_WORKSPACE 'stage\opencode.exe'
+          $project = Join-Path $env:RUNNER_TEMP 'project'
+          New-Item -ItemType Directory -Force $project | Out-Null
+          Set-Location $project
           function Invoke-Bounded([string[]] $arguments, [string] $name) {
             $p = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru `
               -RedirectStandardOutput "$name.out" -RedirectStandardError "$name.err"
@@ -788,17 +895,27 @@ jobs:
             Get-Content "$name.out", "$name.err" | Out-Host
             return $p.ExitCode
           }
-          # First: does the client find the npm-installed opencode on PATH (an opencode.cmd shim on Windows)?
-          $code = Invoke-Bounded @('session', 'list', '--format', 'json') 'path-lookup'
-          $pathLookup = $code -eq 0
-          "finds opencode on PATH: $pathLookup (exit $code)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
-          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' } |
-            ForEach-Object { Stop-Process -Force -Id $_.ProcessId -ErrorAction SilentlyContinue }
-          if (-not $pathLookup) {
-            # Go on with the package's own binary, so session list and service stop are still checked.
-            $env:OPENCODE_TS_BIN = Join-Path (npm root -g) '@opencode\cli\bin\opencode.exe'
-            "OPENCODE_TS_BIN=$env:OPENCODE_TS_BIN ($(& $env:OPENCODE_TS_BIN --version))" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          # The mock provider on the bundled binary as Bun: it prints its URL first.
+          $env:BUN_BE_BUN = '1'
+          "bundled Bun $(& $ts --version)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $mock = Start-Process -FilePath $ts -ArgumentList @((Join-Path $env:GITHUB_WORKSPACE 'preview\bench\mock-provider.ts'), '0', '8', '0') `
+            -NoNewWindow -PassThru -RedirectStandardOutput mock.out -RedirectStandardError mock.err
+          Remove-Item Env:BUN_BE_BUN
+          $url = $null
+          foreach ($i in 1..200) {
+            $line = Get-Content mock.out -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($line) { $url = ($line | ConvertFrom-Json).url; break }
+            Start-Sleep -Milliseconds 50
           }
+          if (-not $url) { throw "the mock provider printed no URL: $(Get-Content -Raw mock.out, mock.err)" }
+          $env:OPENCODE_CONFIG_CONTENT = @{
+            model = 'mock/mock-model'; update = 'disable'; share = 'disabled'; snapshots = $false
+            providers = @{ mock = @{ name = 'Mock'; package = '@ai-sdk/openai-compatible'
+              settings = @{ baseURL = "$url/v1"; apiKey = 'mock' }
+              models = @{ 'mock-model' = @{ name = 'Mock Model'; capabilities = @{ tools = $false }; limit = @{ context = 200000; output = 8192 } } } } }
+          } | ConvertTo-Json -Depth 10 -Compress
+          $env:OPENCODE_DISABLE_MODELS_FETCH = '1'
+          $env:OPENCODE_DISABLE_AUTOUPDATE = '1'
           try {
             # JSON, so an empty list still proves the service answered.
             $code = Invoke-Bounded @('session', 'list', '--format', 'json') 'session-list'
@@ -810,6 +927,13 @@ jobs:
             $registered = Get-ChildItem -Recurse -Filter 'service*.json' $env:XDG_STATE_HOME
             "registered: $($registered.FullName -join ', ')"
             if (-not $registered) { throw 'no service*.json after session list' }
+            $service = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' }
+            "service: $($service.ExecutablePath -join ', ')" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            if (-not ($service.ExecutablePath -contains $ts)) { throw "the service does not run the bundled $ts" }
+            $code = Invoke-Bounded @('run', 'Say hello') 'run'
+            if ($code -ne 0) { throw "run exited $code" }
+            if (-not (Select-String -Quiet 'quick brown fox' run.out)) { throw 'run printed no mock reply' }
+            'a session got the mock reply' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
             $code = Invoke-Bounded @('service', 'stop') 'service-stop'
             if ($code -ne 0) { throw "service stop exited $code" }
             Start-Sleep -Seconds 2
@@ -817,11 +941,11 @@ jobs:
             if ($left) { throw "service*.json still there after service stop: $($left.FullName -join ', ')" }
             $alive = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' }
             if ($alive) { throw "service still running: $($alive.ProcessId -join ', ')" }
-            if (-not $pathLookup) { throw 'the client did not find opencode on PATH (npm installs opencode.cmd); the rest passed with OPENCODE_TS_BIN' }
           } catch {
             Get-ChildItem -Recurse -Filter '*.log' $root | ForEach-Object { "== $($_.FullName)"; Get-Content -Tail 60 $_ }
             throw
           } finally {
+            Stop-Process -Force -Id $mock.Id -ErrorAction SilentlyContinue
             Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' } |
               ForEach-Object { Stop-Process -Force -Id $_.ProcessId -ErrorAction SilentlyContinue }
           }
@@ -977,7 +1101,6 @@ jobs:
           jq -n \
             --arg version "$VERSION" --arg ref "$REF" --arg commit "$COMMIT" --arg dev_base "$DEV_BASE" \
             --arg tag "$OPENTUI_TAG" --arg rev "$OPENTUI_REV" --arg header "$HEADER" --arg rust "$RUST_VERSION" --arg zig "$ZIG_VERSION" \
-            --arg ts_min "$OPENCODE_TS_MIN" \
             --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --argjson assets "$(ls | jq -R . | jq -s .)" \
             '{version: $version, binary: "opencode-native",
@@ -985,7 +1108,7 @@ jobs:
               opentui: ({repository: "anomalyco/opentui"} + (if $tag == "" then {} else {tag: $tag} end)
                 + {rev: $rev, header_fnv1a64: $header}),
               toolchain: {rust: $rust, zig: $zig, profile: "dist"},
-              requires: {opencode: (">= " + $ts_min)},
+              bundles: {opencode: {version: $version, channel: "latest", built_from: $commit}},
               run: $run, assets: $assets}' > manifest.json
           sha256sum -- * > SHA256SUMS
           cat manifest.json SHA256SUMS
@@ -1003,7 +1126,7 @@ jobs:
           cat > notes.md <<EOF
           Preview build of \`opencode-native\`, the OpenCode native CLI, from [\`anomalyco/opencode@$short\`](https://github.com/anomalyco/opencode/commit/$COMMIT) (\`$REF\`; \`dev\` base [\`${DEV_BASE:0:10}\`](https://github.com/anomalyco/opencode/commit/$DEV_BASE)), OpenTUI $opentui.
 
-          Unsigned preview. Needs the TypeScript \`opencode\` $OPENCODE_TS_MIN or newer on \`PATH\`. Install or update:
+          Unsigned preview. Each archive holds \`opencode-native\` and the TypeScript \`opencode\` server it runs, built from the same commit at the same version; nothing else needs to be installed. Install or update:
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | bash

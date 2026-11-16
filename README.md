@@ -48,10 +48,17 @@ machine (AMD Ryzen 7 9800X3D, Linux) are in [docs/benchmark.md](docs/benchmark.m
 the same TypeScript server: it finds or starts the background service, `--server <url>` attaches to one, and
 `--standalone` starts a private one. Sessions and `cli.json` are shared.
 
+Each build bundles that server: the TypeScript `opencode` built from the same commit at the same version sits beside
+`opencode-native` in every archive, the `.deb` and the install script's directory. The client runs it for the service
+and the standalone server, and delegates `serve`, `plugin` and remote access to it. It takes `OPENCODE_TS_BIN` when
+set, else the bundled `opencode`, else `opencode` on `PATH`. When the TUI finds a background service of another
+version, as after an update, it restarts it on the bundled server and says `Restarting background server (version
+mismatch)...`, as the TypeScript TUI does.
+
 What differs:
 
 - Server plugins run in the TypeScript server and work as before.
-- TypeScript TUI plugins do not run; `/plugins` lists them as skipped.
+- TypeScript TUI plugins run on a JS host beside the client, on the bundled server's Bun.
 - Native TUI plugins (`.so`, `.dylib`) load instead: see the
   [quick start](https://github.com/anomalyco/opencode/blob/oc-rust/packages/cli-rs/crates/plugin-abi/README.md).
 - `opencode-native upgrade` does not update a preview build; re-run the install script.
@@ -68,13 +75,21 @@ The full list is in
 curl -fsSL https://raw.githubusercontent.com/simonklee/opencode-native-preview/main/install.sh | bash
 ```
 
-This checks the newest build against `SHA256SUMS` and installs it to `~/.local/bin/opencode-native` (or
-`$OPENCODE_NATIVE_INSTALL_DIR`). Run it again to update. Linux builds need glibc 2.17 or newer (OpenTUI's floor);
-on Alpine and other musl systems the script installs the musl build, which needs nothing but musl. To verify an archive's
-build attestation: `gh attestation verify opencode-native-<version>-<target>.tar.gz --repo simonklee/opencode-native-preview`.
+This checks the newest build against `SHA256SUMS` and installs `opencode-native` and its bundled `opencode` into
+`~/.local/lib/opencode-native` (or `$OPENCODE_NATIVE_LIB_DIR`), with a link to `opencode-native` in `~/.local/bin` (or
+`$OPENCODE_NATIVE_INSTALL_DIR`). The bundled `opencode` stays off `PATH`, so your own `opencode`, if you have one, is
+untouched. Run the script again to update both; the next start of the TUI restarts a service of the old version.
+Linux builds need glibc 2.17 or newer (OpenTUI's floor). On Alpine and other musl systems the script installs the musl
+build: the client needs nothing but musl, and the bundled server's Bun needs `apk add libstdc++ libgcc`, as OpenCode's
+own Docker image installs. To verify an archive's build attestation:
+`gh attestation verify opencode-native-<version>-<target>.tar.gz --repo simonklee/opencode-native-preview`.
 
 On Debian and Ubuntu, download the `.deb` from the [latest release](https://github.com/simonklee/opencode-native-preview/releases)
-and run `sudo apt install ./opencode-native_*.deb`.
+and run `sudo apt install ./opencode-native_*.deb`. It installs both binaries in `/usr/lib/opencode-native` and links
+`/usr/bin/opencode-native`.
+
+Each download is about 135 to 155 MB: the server is most of it (230 to 265 MB unpacked, against 80 to 120 MB for the
+client).
 
 Each archive holds OpenCode's `LICENSE`, `THIRD-PARTY-NOTICES.txt` (the licences of the Rust crates in the binary,
 the tree-sitter grammars among them, and of the sources of its highlight queries) and `licenses/opentui/` (OpenTUI's licence and those of what its native library
@@ -84,21 +99,28 @@ The `.deb` installs them in `/usr/share/doc/opencode-native`. The install script
 
 ## Requirements
 
-Install the TypeScript CLI, 2.2.7 or newer, on `PATH` (or set `OPENCODE_TS_BIN` to it): `npm i -g @opencode/cli`.
-To keep the client's tabs apart from `opencode`'s, set `OPENCODE_TUI_CHANNEL=native-preview`.
+Nothing beyond the download: the server is bundled. The bundled server is built for the channel `latest`, which the
+client uses when `OPENCODE_CHANNEL` is unset, so it shares `service.json` and your sessions with a TypeScript install of
+a release; when both run, each client restarts a service of another version, as two TypeScript versions do. To run
+another TypeScript server instead, set `OPENCODE_TS_BIN` to it. To keep the client's tabs apart from `opencode`'s, set
+`OPENCODE_TUI_CHANNEL=native-preview`.
 
 ## macOS
 
-The binary has only an ad-hoc signature. If you downloaded an archive with a browser, run
-`xattr -d com.apple.quarantine opencode-native`.
+Both binaries have only an ad-hoc signature. If you downloaded an archive with a browser, extract it and run
+`xattr -dr com.apple.quarantine <the extracted directory>`, which clears both. The install script needs none of this.
 
 ## Windows
 
 Download `opencode-native-<version>-x86_64-pc-windows-msvc.zip` (or `aarch64-pc-windows-msvc` on Arm) from the
-[latest release](https://github.com/simonklee/opencode-native-preview/releases) and extract it; if it holds `opentui.dll`,
-keep it next to `opencode-native.exe`. If Windows blocks the download, run `Unblock-File` on the zip before extracting. Install the
-TypeScript CLI with `npm i -g @opencode/cli`. Each build is tested on GitHub's Windows Server 2025 runner (Arm: Windows
-11 Arm), with the TUI on a pseudoconsole (ConPTY); no other terminal is tested.
+[latest release](https://github.com/simonklee/opencode-native-preview/releases) and extract it; keep `opencode.exe`, the
+bundled server, next to `opencode-native.exe` (and `opentui.dll`, if the zip holds one). Put the folder on `PATH` only if
+you have no other `opencode` there, since its `opencode.exe` would shadow it; running `opencode-native.exe` by its path
+works either way. If Windows blocks the download, run `Unblock-File` on the zip before extracting, which clears both
+files. Before extracting an update over the old files, run `opencode-native service stop`: Windows does not replace a
+running `opencode.exe`. The first start of the 265 MB server can take several seconds while Defender scans it. Each build
+is tested on GitHub's Windows Server 2025 runner (Arm: Windows 11 Arm), with the TUI on a pseudoconsole (ConPTY); no
+other terminal is tested.
 
 ## Reporting bugs
 
