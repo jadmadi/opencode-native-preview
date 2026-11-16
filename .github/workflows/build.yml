@@ -41,7 +41,9 @@ jobs:
       dev_base: ${{ steps.plan.outputs.dev_base }}
       opentui_rev: ${{ steps.plan.outputs.opentui_rev }}
       header_fnv1a64: ${{ steps.plan.outputs.header_fnv1a64 }}
+      opentui_tag: ${{ steps.plan.outputs.opentui_tag }}
       opentui_release: ${{ steps.plan.outputs.opentui_release }}
+      opentui_native: ${{ steps.plan.outputs.opentui_native }}
       zig_version: ${{ steps.plan.outputs.zig_version }}
       skip: ${{ steps.plan.outputs.skip }}
       bin: ${{ steps.plan.outputs.bin }}
@@ -63,14 +65,36 @@ jobs:
           commit=$(git rev-parse FETCH_HEAD)
           git fetch -q --filter=tree:0 origin dev:refs/remotes/origin/dev
           dev_base=$(git merge-base "$commit" origin/dev)
-          rev=$(git show "$commit:packages/cli-rs/Cargo.toml" | sed -nE 's/^opentui *= *\{.*rev *= *"([0-9a-f]{40})".*/\1/p')
-          test -n "$rev"
+          # OpenTUI pinned by release (`tag = "vX.Y.Z"`, whose commit Cargo.lock records) or by commit (`rev`).
+          dep=$(git show "$commit:packages/cli-rs/Cargo.toml" | grep -E '^opentui *= *\{') || { echo "no opentui dependency"; exit 1; }
+          tag=$(sed -nE 's/.*[{,] *tag *= *"([^"]+)".*/\1/p' <<<"$dep")
+          if [ -n "$tag" ]; then
+            rev=$(git show "$commit:packages/cli-rs/Cargo.lock" |
+              sed -nE "s|^source = \"git\+https://github\.com/anomalyco/opentui(\.git)?\?tag=$tag#([0-9a-f]{40})\"$|\2|p" | sort -u)
+          else
+            rev=$(sed -nE 's/.*[{,] *rev *= *"([0-9a-f]{40})".*/\1/p' <<<"$dep")
+          fi
+          [ -n "$rev" ] && [ "$(wc -l <<<"$rev")" = 1 ] || { echo "no single OpenTUI commit for '$dep'"; exit 1; }
           hash=$(curl -fsSL "https://raw.githubusercontent.com/anomalyco/opentui/$rev/packages/rust/crates/opentui-sys/src/generated.rs" \
             | sed -nE 's/.*OPENTUI_HEADER_FNV1A64: u64 = (0x[0-9a-f_]+);.*/\1/p' | tr -d _)
           test -n "$hash"
-          # The OpenTUI release whose native zips hold what the pin builds (its header, and the same packages/native);
-          # none means a source build per target, as for a pin past the last release.
-          release=$("$GITHUB_WORKSPACE/preview/scripts/opentui-release.sh" tag "$hash" "$rev")
+          # Where each target's native library comes from: for a tag, the client's own script (its sha256 table); for a
+          # rev, the OpenTUI release whose native zips hold what the pin builds (its header, and the same
+          # packages/native), else a source build per target, as for a pin past the last release.
+          release=
+          if [ -n "$tag" ]; then
+            native=tag
+          else
+            release=$("$GITHUB_WORKSPACE/preview/scripts/opentui-release.sh" tag "$hash" "$rev")
+            native=${release:+release}
+            native=${native:-source}
+          fi
+          # A client that pins its toolchain (rust-toolchain.toml) gets it in every cargo run, past `rustup default`, and
+          # without the cross targets installed below: it must be the one this workflow installs and records.
+          if toolchain=$(git show "$commit:packages/cli-rs/rust-toolchain.toml" 2>/dev/null); then
+            channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' <<<"$toolchain")
+            [ "$channel" = "$RUST_VERSION" ] || { echo "the client pins Rust '$channel', this workflow $RUST_VERSION"; exit 1; }
+          fi
           # The Zig that the pinned OpenTUI's native build asks for.
           zig=$(curl -fsSL "https://raw.githubusercontent.com/anomalyco/opentui/$rev/packages/native/build.zig.zon" \
             | sed -nE 's/.*\.minimum_zig_version = "([^"]+)".*/\1/p')
@@ -100,15 +124,17 @@ jobs:
           {
             echo "commit=$commit"
             echo "dev_base=$dev_base"
+            echo "opentui_tag=$tag"
             echo "opentui_rev=$rev"
             echo "header_fnv1a64=$hash"
             echo "opentui_release=$release"
+            echo "opentui_native=$native"
             echo "zig_version=$zig"
             echo "skip=$skip"
             echo "bin=$bin"
             echo "version=$version"
           } | tee -a "$GITHUB_OUTPUT"
-          echo "$REF -> $commit (dev base $dev_base), OpenTUI $rev ($hash, Zig $zig, native ${release:-from source}), binary $bin, version $version, skip=$skip" >> "$GITHUB_STEP_SUMMARY"
+          echo "$REF -> $commit (dev base $dev_base), OpenTUI ${tag:+$tag at }$rev ($hash, Zig $zig, native: $native${release:+ $release}), binary $bin, version $version, skip=$skip" >> "$GITHUB_STEP_SUMMARY"
 
   # THIRD-PARTY-NOTICES.txt for every archive: the licences of the crates linked into the binary (the tree-sitter
   # grammars among them), read from Cargo.lock by cargo-about, with notices/about.toml's allow-list; then the highlight
@@ -220,6 +246,7 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       # How the runner starts the target's binary: through Rosetta for x86_64 macOS.
       RUN: ${{ matrix.run }}
+      OPENTUI_NATIVE: ${{ needs.plan.outputs.opentui_native }}
       OPENTUI_RELEASE: ${{ needs.plan.outputs.opentui_release }}
       HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
     steps:
@@ -237,26 +264,34 @@ jobs:
             packages/cli-rs
             packages/ui/src/assets/audio
 
-      # The pin's OpenTUI release zip when one carries its header; else a source build, cached by pin and target.
-      - name: OpenTUI native library (release zip)
-        if: env.OPENTUI_RELEASE != ''
-        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
+      # A tag pin's release zip; for a rev pin, the OpenTUI release zip that holds what it builds, else a source build,
+      # cached by pin and target.
       - id: native-cache
-        if: env.OPENTUI_RELEASE == ''
+        if: env.OPENTUI_NATIVE == 'source'
         uses: actions/cache@v4
         with:
           path: native
           key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v2
-      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true'
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ needs.plan.outputs.zig_version }}
-      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_NATIVE == 'tag' || (env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true')
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      # A tag pin: the client's script installs the release zip it checks against its own sha256 table (opentui.h, the
+      # static archive opentui-sys links, licenses/), as a local build of the client does.
+      - name: OpenTUI native library (client's release zip)
+        if: env.OPENTUI_NATIVE == 'tag'
+        run: |
+          bun run --cwd opencode/packages/cli-rs opentui:native --target "$TARGET" --dest "$GITHUB_WORKSPACE/native"
+          cat native/STAMP.json
+      - name: OpenTUI native library (release zip)
+        if: env.OPENTUI_NATIVE == 'release'
+        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
       - name: OpenTUI native library (source build)
-        if: env.OPENTUI_RELEASE == ''
+        if: env.OPENTUI_NATIVE == 'source'
         run: scripts/opentui-native.sh "$TARGET" native && cat native/STAMP
 
       - name: Rust
@@ -404,7 +439,7 @@ jobs:
           if-no-files-found: error
 
   # The Windows libraries, from the pin's OpenTUI release zip or cross-built here: FFmpeg does not build on Windows
-  # hosts.
+  # hosts. A tag pin's zip has opentui-static.lib and no DLL, so the .exe links it and its zip holds the .exe alone.
   native-windows:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
@@ -415,6 +450,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TARGET: ${{ matrix.target }}
+      OPENTUI_NATIVE: ${{ needs.plan.outputs.opentui_native }}
       OPENTUI_RELEASE: ${{ needs.plan.outputs.opentui_release }}
       HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
     steps:
@@ -428,25 +464,32 @@ jobs:
           path: opencode
           persist-credentials: false
           sparse-checkout: packages/cli-rs
-      - name: OpenTUI native library (release zip)
-        if: env.OPENTUI_RELEASE != ''
-        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
       - id: native-cache
-        if: env.OPENTUI_RELEASE == ''
+        if: env.OPENTUI_NATIVE == 'source'
         uses: actions/cache@v4
         with:
           path: native
           key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v2
-      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true'
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ needs.plan.outputs.zig_version }}
-      - if: env.OPENTUI_RELEASE == '' && steps.native-cache.outputs.cache-hit != 'true'
+      - if: env.OPENTUI_NATIVE == 'tag' || (env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true')
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      # A tag pin: the client's script installs the release zip it checks against its own sha256 table (opentui.h, the
+      # static archive opentui-sys links, licenses/), as a local build of the client does.
+      - name: OpenTUI native library (client's release zip)
+        if: env.OPENTUI_NATIVE == 'tag'
+        run: |
+          bun run --cwd opencode/packages/cli-rs opentui:native --target "$TARGET" --dest "$GITHUB_WORKSPACE/native"
+          cat native/STAMP.json
+      - name: OpenTUI native library (release zip)
+        if: env.OPENTUI_NATIVE == 'release'
+        run: scripts/opentui-release.sh fetch "$OPENTUI_RELEASE" "$TARGET" native "$HEADER" && cat native/STAMP
       - name: OpenTUI native library (source build)
-        if: env.OPENTUI_RELEASE == ''
+        if: env.OPENTUI_NATIVE == 'source'
         run: scripts/opentui-native.sh "$TARGET" native && cat native/STAMP
       - uses: actions/upload-artifact@v4
         with:
@@ -844,6 +887,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       COMMIT: ${{ needs.plan.outputs.commit }}
       DEV_BASE: ${{ needs.plan.outputs.dev_base }}
+      OPENTUI_TAG: ${{ needs.plan.outputs.opentui_tag }}
       OPENTUI_REV: ${{ needs.plan.outputs.opentui_rev }}
       HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
       REF: ${{ inputs.ref || 'oc-rust' }}
@@ -861,13 +905,14 @@ jobs:
           cd dist
           jq -n \
             --arg version "$VERSION" --arg ref "$REF" --arg commit "$COMMIT" --arg dev_base "$DEV_BASE" \
-            --arg rev "$OPENTUI_REV" --arg header "$HEADER" --arg rust "$RUST_VERSION" --arg zig "$ZIG_VERSION" \
+            --arg tag "$OPENTUI_TAG" --arg rev "$OPENTUI_REV" --arg header "$HEADER" --arg rust "$RUST_VERSION" --arg zig "$ZIG_VERSION" \
             --arg ts_min "$OPENCODE_TS_MIN" \
             --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --argjson assets "$(ls | jq -R . | jq -s .)" \
             '{version: $version, binary: "opencode-native",
               opencode: {repository: "anomalyco/opencode", ref: $ref, commit: $commit, dev_base: $dev_base},
-              opentui: {repository: "anomalyco/opentui", rev: $rev, header_fnv1a64: $header},
+              opentui: ({repository: "anomalyco/opentui"} + (if $tag == "" then {} else {tag: $tag} end)
+                + {rev: $rev, header_fnv1a64: $header}),
               toolchain: {rust: $rust, zig: $zig, profile: "dist"},
               requires: {opencode: (">= " + $ts_min)},
               run: $run, assets: $assets}' > manifest.json
@@ -880,8 +925,12 @@ jobs:
         run: |
           set -euo pipefail
           short=${COMMIT:0:10}
+          opentui="[\`${OPENTUI_REV:0:10}\`](https://github.com/anomalyco/opentui/commit/$OPENTUI_REV)"
+          if [ -n "$OPENTUI_TAG" ]; then
+            opentui="[\`$OPENTUI_TAG\`](https://github.com/anomalyco/opentui/releases/tag/$OPENTUI_TAG) ($opentui)"
+          fi
           cat > notes.md <<EOF
-          Preview build of \`opencode-native\`, the OpenCode native CLI, from [\`anomalyco/opencode@$short\`](https://github.com/anomalyco/opencode/commit/$COMMIT) (\`$REF\`; \`dev\` base [\`${DEV_BASE:0:10}\`](https://github.com/anomalyco/opencode/commit/$DEV_BASE)), OpenTUI [\`${OPENTUI_REV:0:10}\`](https://github.com/anomalyco/opentui/commit/$OPENTUI_REV).
+          Preview build of \`opencode-native\`, the OpenCode native CLI, from [\`anomalyco/opencode@$short\`](https://github.com/anomalyco/opencode/commit/$COMMIT) (\`$REF\`; \`dev\` base [\`${DEV_BASE:0:10}\`](https://github.com/anomalyco/opencode/commit/$DEV_BASE)), OpenTUI $opentui.
 
           Unsigned preview. Needs the TypeScript \`opencode\` $OPENCODE_TS_MIN or newer on \`PATH\`. Install or update:
 
