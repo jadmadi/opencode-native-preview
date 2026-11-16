@@ -221,12 +221,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux matches OpenTUI's floors (O-164): glibc 2.17 through cargo zigbuild, and musl, linked dynamically so
+          # native plugins load. musl is optional until it has passed: a client from before its .cargo/config.toml
+          # musl section builds a static binary, which the floor check refuses.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             lto: fat
+            libc: gnu
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
             lto: fat
+            libc: gnu
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            lto: fat
+            libc: musl
+            optional: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
+            lto: fat
+            libc: musl
+            optional: true
           - target: aarch64-apple-darwin
             os: macos-15
             lto: fat
@@ -246,6 +261,9 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       # How the runner starts the target's binary: through Rosetta for x86_64 macOS.
       RUN: ${{ matrix.run }}
+      # Linux only: the C library, and the target cargo zigbuild links for (glibc's carries the 2.17 floor).
+      LIBC: ${{ matrix.libc }}
+      ZIG_TARGET: ${{ matrix.target }}${{ matrix.libc == 'gnu' && '.2.17' || '' }}
       OPENTUI_NATIVE: ${{ needs.plan.outputs.opentui_native }}
       OPENTUI_RELEASE: ${{ needs.plan.outputs.opentui_release }}
       HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
@@ -272,7 +290,8 @@ jobs:
         with:
           path: native
           key: opentui-native-${{ needs.plan.outputs.opentui_rev }}-${{ matrix.target }}-v2
-      - if: env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true'
+      # Zig, OpenTUI's version: for a source build of the library, and on Linux as cargo zigbuild's linker.
+      - if: (env.OPENTUI_NATIVE == 'source' && steps.native-cache.outputs.cache-hit != 'true') || env.LIBC != ''
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ needs.plan.outputs.zig_version }}
@@ -298,6 +317,10 @@ jobs:
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
           rustup default "$RUST_VERSION"
+      - if: env.LIBC != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: opencode/packages/cli-rs -> target
@@ -324,7 +347,13 @@ jobs:
           CARGO_PROFILE_DIST_SPLIT_DEBUGINFO: ${{ runner.os == 'macOS' && 'packed' || 'off' }}
         run: |
           start=$(date +%s)
-          cargo build --locked --profile dist --target "$TARGET" --bin "$BIN"
+          if [ -n "$LIBC" ]; then
+            # Zig links against glibc 2.17's symbols, or against musl dynamically (the client's .cargo/config.toml gives
+            # musl -crt-static and Zig's -dynamic); its output lands in target/$TARGET as cargo's does.
+            cargo zigbuild --locked --profile dist --target "$ZIG_TARGET" --bin "$BIN"
+          else
+            cargo build --locked --profile dist --target "$TARGET" --bin "$BIN"
+          fi
           echo "build: $(( $(date +%s) - start )) s" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Strip
@@ -343,11 +372,15 @@ jobs:
             objcopy --only-keep-debug stage/opencode-native debug/opencode-native.debug
             strip --strip-all stage/opencode-native
             objcopy --add-gnu-debuglink=debug/opencode-native.debug stage/opencode-native
-            echo "highest GLIBC: $(objdump -T stage/opencode-native | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           ls -l "$bin" stage/opencode-native | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Linux floor
+        if: env.LIBC != ''
+        run: scripts/check-linux.sh stage/opencode-native "$LIBC" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test
+        # A musl binary needs musl's loader, which the runner lacks: its smoke runs in Alpine below.
+        if: env.LIBC != 'musl'
         run: |
           set -euo pipefail
           file stage/opencode-native
@@ -375,6 +408,43 @@ jobs:
             exit 1
           fi
           python3 -I -c 'import json, sys; assert isinstance(json.load(open(sys.argv[1])), list)' session-list.txt
+      - name: Sample plugin
+        # An in-repo native plugin, linked as the client is, for the floor's smoke: it loads through dlopen.
+        if: env.LIBC != ''
+        working-directory: opencode/packages/cli-rs
+        run: |
+          set -euo pipefail
+          cargo zigbuild --locked --release --manifest-path crates/plugin/examples/sample/Cargo.toml --target "$ZIG_TARGET"
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cp "crates/plugin/examples/sample/target/$TARGET/release/libopencode_sample_plugin.so" "$RUNNER_TEMP/smoke/plugin.so"
+          cp "$GITHUB_WORKSPACE/stage/opencode-native" "$RUNNER_TEMP/smoke/"
+      - name: Smoke test on the floor (CentOS 7, glibc 2.17)
+        if: env.LIBC == 'gnu'
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -e HOME=/tmp -e TMPDIR=/tmp -v "$RUNNER_TEMP/smoke:/work:ro" centos:7 sh -euc '
+            ldd --version | head -n 1
+            /work/opencode-native --version
+            /work/opencode-native plugin test /work/plugin.so')
+          echo "$out"
+          case $out in *"$VERSION"*"sample plugin v1"*) ;; *) echo "no version or no plugin frame"; exit 1 ;; esac
+      - name: Smoke test on the floor (Alpine, musl)
+        # A bare Alpine: musl alone, then the TypeScript CLI's musl build for the service.
+        if: env.LIBC == 'musl'
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -e HOME=/tmp -e TMPDIR=/tmp -v "$RUNNER_TEMP/smoke:/work:ro" alpine:3.22 sh -euc '
+            cat /etc/alpine-release
+            /work/opencode-native --version
+            /work/opencode-native plugin test /work/plugin.so
+            apk add --no-cache nodejs npm >/dev/null
+            npm install -g "@opencode/cli@latest" >/dev/null
+            echo "TypeScript CLI: $(opencode --version)"
+            timeout 180 /work/opencode-native session list --format json > /tmp/sessions.json
+            cat /tmp/sessions.json')
+          echo "$out"
+          case $out in *"$VERSION"*"sample plugin v1"*"TypeScript CLI"*) ;; *) echo "no version, plugin frame or service"; exit 1 ;; esac
+          [ "$(tail -n 1 <<<"$out" | head -c 1)" = "[" ] || { echo "session list printed no JSON array"; exit 1; }
 
       - uses: actions/download-artifact@v5
         with:
@@ -395,7 +465,8 @@ jobs:
           tar -tzf "dist/$name.tar.gz"
           ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Debian package
-        if: runner.os == 'Linux'
+        # glibc builds only; their floor is OpenTUI's 2.17, and Zig's link needs no libgcc_s.
+        if: env.LIBC == 'gnu'
         run: |
           set -euo pipefail
           case $TARGET in x86_64-*) arch=amd64 ;; aarch64-*) arch=arm64 ;; esac
@@ -414,7 +485,7 @@ jobs:
           Version: $debversion
           Architecture: $arch
           Maintainer: Simon Klee <hello@simonklee.dk>
-          Depends: libc6 (>= 2.35), libgcc-s1
+          Depends: libc6 (>= 2.17)
           Section: devel
           Priority: optional
           Homepage: https://github.com/$GITHUB_REPOSITORY

@@ -9,7 +9,7 @@ set -euo pipefail
 
 REPO=simonklee/opencode-native-preview
 TS_MIN=2.2.7
-GLIBC_MIN=2.35
+GLIBC_MIN=2.17
 dir=${OPENCODE_NATIVE_INSTALL_DIR:-${OPENCODE_RS_INSTALL_DIR:-$HOME/.local/bin}} # the second name is the old one
 
 die() { printf 'opencode-native install: %s\n' "$*" >&2; exit 1; }
@@ -38,13 +38,15 @@ if [ "$os" = darwin ]; then
   fi
 else
   if ls /lib/ld-musl-* >/dev/null 2>&1 || (ldd --version 2>&1 | grep -qi musl); then
-    die "musl libc (Alpine and similar) is not supported yet; the preview needs glibc $GLIBC_MIN or newer"
+    # Alpine and other musl systems: a build linked against musl dynamically, as OpenTUI ships one.
+    target=$arch-unknown-linux-musl
+  else
+    glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    [ -n "$glibc" ] || die "could not find the glibc version; the preview needs glibc $GLIBC_MIN or newer"
+    at_least "$glibc" "$GLIBC_MIN" ||
+      die "glibc $glibc is too old; the preview needs glibc $GLIBC_MIN or newer (CentOS 7, Ubuntu 14.04, Debian 8 and later)"
+    target=$arch-unknown-linux-gnu
   fi
-  glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
-  [ -n "$glibc" ] || die "could not find the glibc version; the preview needs glibc $GLIBC_MIN or newer"
-  at_least "$glibc" "$GLIBC_MIN" ||
-    die "glibc $glibc is too old; the preview needs glibc $GLIBC_MIN or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+)"
-  target=$arch-unknown-linux-gnu
 fi
 
 if [ -n "${OPENCODE_NATIVE_VERSION:-}" ]; then

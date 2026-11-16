@@ -31,6 +31,8 @@ client=${OPENCODE_DIR:-opencode}/packages/cli-rs/Cargo.toml
 case $target in
   x86_64-unknown-linux-gnu) zig_target=x86_64-linux-gnu.2.17 name=x86_64-linux files="opentui.h libopentui.a libopentui.so" ;;
   aarch64-unknown-linux-gnu) zig_target=aarch64-linux-gnu.2.17 name=aarch64-linux files="opentui.h libopentui.a libopentui.so" ;;
+  x86_64-unknown-linux-musl) zig_target=x86_64-linux-musl name=x86_64-linux-musl files="opentui.h libopentui.a libopentui.so" ;;
+  aarch64-unknown-linux-musl) zig_target=aarch64-linux-musl name=aarch64-linux-musl files="opentui.h libopentui.a libopentui.so" ;;
   aarch64-apple-darwin) zig_target=aarch64-macos.13.0 name=aarch64-macos files="opentui.h libopentui.a libopentui.dylib" ;;
   x86_64-apple-darwin) zig_target=x86_64-macos.13.0 name=x86_64-macos files="opentui.h libopentui.a libopentui.dylib" ;;
   # D85: Windows links opentui.dll through its import library, with or without the static feature.

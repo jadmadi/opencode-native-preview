@@ -31,6 +31,8 @@ table() {
   cat <<'EOF'
 v0.9.0 0xfcf352f7f1c874b8 linux-x64 12106d9a5998f0d6273866bdcfb587c12da67622712aeb3600e3ca4411d0ffd5
 v0.9.0 0xfcf352f7f1c874b8 linux-arm64 74eb85b88b332b3ef90b0775ec06fe67eca8709ec47c37985b37ff52bcfd4f1c
+v0.9.0 0xfcf352f7f1c874b8 linux-x64-musl 7f83e0e27835996b140d6c41ba4d00b0bd5bfc004b26de30694d90137fff333b
+v0.9.0 0xfcf352f7f1c874b8 linux-arm64-musl 1c49acf05928b56529508d7370b285aa9228f055b72235b454619300f36e4bd1
 v0.9.0 0xfcf352f7f1c874b8 darwin-x64 9b292afe6134c620e0f3286e5a2c2babe16c15f17d32a5d8b351dcca4d1a632e
 v0.9.0 0xfcf352f7f1c874b8 darwin-arm64 c9c39f379bc5f749e9627b6992c55f700a0e373dd7f5aa559c7ecb2448982abd
 v0.9.0 0xfcf352f7f1c874b8 windows-x64 84f5bdee3393124f268206e5e78adbfdddce7001f327c35ce3d2fa483e09c365
@@ -98,6 +100,8 @@ case ${1:-} in
     case $target in
       x86_64-unknown-linux-gnu) platform=linux-x64 files="opentui.h libopentui.a" ;;
       aarch64-unknown-linux-gnu) platform=linux-arm64 files="opentui.h libopentui.a" ;;
+      x86_64-unknown-linux-musl) platform=linux-x64-musl files="opentui.h libopentui.a" ;;
+      aarch64-unknown-linux-musl) platform=linux-arm64-musl files="opentui.h libopentui.a" ;;
       x86_64-apple-darwin) platform=darwin-x64 files="opentui.h libopentui.a" ;;
       aarch64-apple-darwin) platform=darwin-arm64 files="opentui.h libopentui.a" ;;
       x86_64-pc-windows-msvc) platform=windows-x64 files="opentui.h" optional="opentui.dll opentui.lib opentui-static.lib" ;;

@@ -3,8 +3,8 @@
 The OpenCode native CLI, `opencode-native`, is a Rust client for [OpenCode](https://github.com/anomalyco/opencode),
 built from its `oc-rust` branch. Each build is an unsigned
 [prerelease](https://github.com/simonklee/opencode-native-preview/releases) for Linux x64, Linux arm64, macOS arm64,
-and Windows x64, for testers. macOS x64 and Windows arm64 builds are new: a release has them when they passed their
-smoke tests.
+and Windows x64, for testers. macOS x64, Windows arm64 and the Linux musl builds (x64 and arm64, for Alpine) are
+new: a release has them when they passed their smoke tests.
 
 ## Startup and memory
 
@@ -69,7 +69,8 @@ curl -fsSL https://raw.githubusercontent.com/simonklee/opencode-native-preview/m
 ```
 
 This checks the newest build against `SHA256SUMS` and installs it to `~/.local/bin/opencode-native` (or
-`$OPENCODE_NATIVE_INSTALL_DIR`). Run it again to update. Linux builds need glibc 2.35 or newer. To verify an archive's
+`$OPENCODE_NATIVE_INSTALL_DIR`). Run it again to update. Linux builds need glibc 2.17 or newer (OpenTUI's floor);
+on Alpine and other musl systems the script installs the musl build, which needs nothing but musl. To verify an archive's
 build attestation: `gh attestation verify opencode-native-<version>-<target>.tar.gz --repo simonklee/opencode-native-preview`.
 
 On Debian and Ubuntu, download the `.deb` from the [latest release](https://github.com/simonklee/opencode-native-preview/releases)
