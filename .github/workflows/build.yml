@@ -160,6 +160,34 @@ jobs:
           path: notices-out/
           if-no-files-found: error
 
+  # RustSec advisories against the crates the client links, read from packages/cli-rs/deny.toml and the database. A new
+  # one fails this job and so blocks the release; a commit from before the policy has none to check and still publishes.
+  advisories:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: anomalyco/opencode
+          ref: ${{ needs.plan.outputs.commit }}
+          path: opencode
+          persist-credentials: false
+          sparse-checkout: packages/cli-rs
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Advisories
+        working-directory: opencode/packages/cli-rs
+        run: |
+          set -euo pipefail
+          # cargo deny arrived with deny.toml; an older ref is not failed for lacking the policy it predates.
+          if [ ! -f deny.toml ]; then
+            echo "::notice::${{ needs.plan.outputs.commit }} predates cargo deny; advisories not checked"
+            exit 0
+          fi
+          cargo deny --workspace --locked check --hide-inclusion-graph advisories
+
   build:
     needs: [plan, notices]
     if: needs.plan.outputs.skip != 'true'
@@ -805,7 +833,7 @@ jobs:
   # Only main publishes; a branch's run stops before this job. An optional target that failed has uploaded no dist-*,
   # so its archive is left out.
   release:
-    needs: [plan, build, windows, windows-test]
+    needs: [plan, advisories, build, windows, windows-test]
     if: needs.plan.outputs.skip != 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
