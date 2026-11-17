@@ -950,6 +950,85 @@ jobs:
               ForEach-Object { Stop-Process -Force -Id $_.ProcessId -ErrorAction SilentlyContinue }
           }
 
+      - name: Smoke 4b - npm's opencode.cmd on PATH, without the bundled server (W5)
+        # The published TypeScript CLI from `npm i -g` into a temporary prefix on PATH, and opencode-native.exe alone in
+        # a directory with no opencode.exe beside it: the client must find npm's opencode.cmd through PATH and PATHEXT
+        # and run the .exe it names. session list starts the service through it, and service stop ends it. The step
+        # before it (Smoke 4) covers the bundled server; this one the lookup a user without the bundle relies on.
+        # Each smoke runs once the package exists, also after an earlier smoke failed.
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'npm-prefix'
+          New-Item -ItemType Directory -Force $prefix | Out-Null
+          npm install -g --prefix $prefix "@opencode/cli@latest" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "npm install exited $LASTEXITCODE" }
+          $env:PATH = "$prefix;$env:PATH"
+          $shim = Join-Path $prefix 'opencode.cmd'
+          if (-not (Test-Path $shim)) { throw "npm wrote no $shim" }
+          $npmExe = Join-Path $prefix 'node_modules\@opencode\cli\bin\opencode.exe'
+          "TypeScript CLI: $(opencode --version)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "where opencode: $((where.exe opencode) -join ', ')" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          # The client alone: no bundled opencode.exe beside it, so only PATH can serve.
+          $alone = Join-Path $env:RUNNER_TEMP 'client-alone'
+          New-Item -ItemType Directory -Force $alone | Out-Null
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'stage\opencode-native.exe') $alone
+          if (Test-Path (Join-Path $alone 'opencode.exe')) { throw 'opencode.exe is beside the client' }
+          $exe = Join-Path $alone 'opencode-native.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'home-npm'
+          $env:USERPROFILE = $root
+          $env:HOME = $root
+          $env:XDG_CONFIG_HOME = "$root\.config"
+          $env:XDG_DATA_HOME = "$root\.local\share"
+          $env:XDG_STATE_HOME = "$root\.local\state"
+          $env:XDG_CACHE_HOME = "$root\.cache"
+          foreach ($d in $env:XDG_CONFIG_HOME, $env:XDG_DATA_HOME, $env:XDG_STATE_HOME, $env:XDG_CACHE_HOME) {
+            New-Item -ItemType Directory -Force $d | Out-Null
+          }
+          Remove-Item Env:OPENCODE_TS_BIN -ErrorAction SilentlyContinue
+          $project = Join-Path $env:RUNNER_TEMP 'project-npm'
+          New-Item -ItemType Directory -Force $project | Out-Null
+          Set-Location $project
+          function Invoke-Bounded([string[]] $arguments, [string] $name) {
+            $p = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput "$name.out" -RedirectStandardError "$name.err"
+            $null = $p.Handle
+            if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "$name timed out" }
+            # Out-Host, so the output is not part of the function's return value.
+            Get-Content "$name.out", "$name.err" | Out-Host
+            return $p.ExitCode
+          }
+          try {
+            # JSON, so an empty list still proves the service answered.
+            $code = Invoke-Bounded @('session', 'list', '--format', 'json') 'session-list'
+            if ($code -ne 0) { throw "session list exited $($code); the client did not find npm's opencode.cmd on PATH" }
+            $list = Get-Content -Raw session-list.out | ConvertFrom-Json -NoEnumerate
+            if ($list -isnot [array]) { throw 'session list did not print a JSON array' }
+            $registered = Get-ChildItem -Recurse -Filter 'service*.json' $env:XDG_STATE_HOME
+            "registered: $($registered.FullName -join ', ')"
+            if (-not $registered) { throw 'no service*.json after session list' }
+            # The shim resolves to the .exe it runs, so the service is npm's opencode.exe, not cmd.exe.
+            $service = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' }
+            "service: $($service.ExecutablePath -join ', ')" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            if (-not ($service.ExecutablePath -contains $npmExe)) { throw "the service does not run npm's $npmExe" }
+            $code = Invoke-Bounded @('service', 'stop') 'service-stop'
+            if ($code -ne 0) { throw "service stop exited $code" }
+            Start-Sleep -Seconds 2
+            $left = Get-ChildItem -Recurse -Filter 'service*.json' $env:XDG_STATE_HOME
+            if ($left) { throw "service*.json still there after service stop: $($left.FullName -join ', ')" }
+            $alive = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' }
+            if ($alive) { throw "service still running: $($alive.ProcessId -join ', ')" }
+            "finds npm's opencode.cmd on PATH: True" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          } catch {
+            Get-ChildItem -Recurse -Filter '*.log' $root | ForEach-Object { "== $($_.FullName)"; Get-Content -Tail 60 $_ }
+            throw
+          } finally {
+            Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' } |
+              ForEach-Object { Stop-Process -Force -Id $_.ProcessId -ErrorAction SilentlyContinue }
+          }
+
       - name: Smoke 5 - TUI and prompts on a pseudoconsole (W10)
         # Each smoke runs once the package exists, also after an earlier smoke failed.
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
