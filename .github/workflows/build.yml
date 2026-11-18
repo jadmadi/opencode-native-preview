@@ -1128,9 +1128,46 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/test"
+          log=$RUNNER_TEMP/test/cargo-test.txt
           # opentui.dll must be on PATH for the test binaries.
-          PATH="$GITHUB_WORKSPACE/native:$PATH" cargo test --locked --workspace --target "$TARGET" --no-fail-fast \
-            2>&1 | tee "$RUNNER_TEMP/test/cargo-test.txt"
+          export PATH="$GITHUB_WORKSPACE/native:$PATH"
+          run=(cargo test --locked --workspace --target "$TARGET")
+          if "${run[@]}" --no-fail-fast 2>&1 | tee "$log"; then exit 0; fi
+
+          # The merge lane's flake rule: a test that failed is run alone three times, and the job passes only when each
+          # failed test passes every rerun. More than three failed tests, or a target that failed without a named test
+          # (a compile error, a crashed binary, a doctest), fails it as before.
+          tr -d '\r' < "$log" > "$log.lf"
+          mapfile -t failed < <(sed -nE 's/^test ([A-Za-z0-9_:]+) \.\.\. FAILED$/\1/p' "$log.lf" | sort -u)
+          # Each target's results follow its `Running`/`Doc-tests` line; count the targets that named a failed test.
+          named=$(awk '/^ *(Running|Doc-tests) / { target = $0 } /^test [A-Za-z0-9_:]+ \.\.\. FAILED$/ { seen[target] = 1 }
+            END { n = 0; for (t in seen) n++; print n }' "$log.lf")
+          targets=$(grep -c '^error: test failed, to rerun pass' "$log.lf" || true)
+          echo "failed tests: ${#failed[@]} (${failed[*]}); failed targets: $targets, with a named test: $named"
+          if [ "${#failed[@]}" -eq 0 ] || [ "${#failed[@]}" -gt 3 ] || [ "$targets" -ne "$named" ]; then
+            echo "not a flake: rerunning nothing"
+            exit 1
+          fi
+          for name in "${failed[@]}"; do
+            for attempt in 1 2 3; do
+              out=$RUNNER_TEMP/test/rerun-${name//::/__}-$attempt.txt
+              # The same command, profile, target and environment as above, so cargo reuses the built test binaries;
+              # `--tests` leaves out the doctests, which would compile again. `--exact` runs that test alone in every
+              # binary that has it.
+              status=0
+              "${run[@]}" --tests -- "$name" --exact 2>&1 | tee "$out" || status=$?
+              if [ "$status" -ne 0 ] || ! tr -d '\r' < "$out" | grep -qxF "test $name ... ok"; then
+                echo "$name failed rerun $attempt of 3 (exit $status)"
+                exit 1
+              fi
+            done
+          done
+          {
+            echo '### Flaky on Windows'
+            echo 'Each failed in the full run and passed three reruns alone, so the release goes on:'
+            # shellcheck disable=SC2016 # Markdown code spans, not expansions
+            printf -- '- `%s`\n' "${failed[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         name: Summary
         run: |
