@@ -64,7 +64,8 @@ What differs:
 - `opencode-native upgrade` does not update a preview build; re-run the install script.
 - There is no `/restart`; use `opencode-native service restart`.
 - HTTPS trusts the system's root certificates; `NODE_EXTRA_CA_CERTS` is ignored.
-- 14 languages are syntax-highlighted; others show as plain text.
+- 35 languages are syntax-highlighted. Others show as plain text, among them Kotlin, OCaml and F#, which the
+  TypeScript client highlights.
 
 The full list is in
 [`parity/deviations`](https://github.com/anomalyco/opencode/tree/oc-rust/packages/cli-rs/parity/deviations).
