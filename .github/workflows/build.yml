@@ -1137,7 +1137,8 @@ jobs:
           # The merge lane's flake rule: a test that failed is run alone three times, and the job passes only when each
           # failed test passes every rerun. More than three failed tests, or a target that failed without a named test
           # (a compile error, a crashed binary, a doctest), fails it as before.
-          tr -d '\r' < "$log" > "$log.lf"
+          # Cargo colors its own `error:` lines (CARGO_TERM_COLOR); strip the escapes so they match below.
+          tr -d '\r' < "$log" | sed -E 's/\x1b\[[0-9;]*m//g' > "$log.lf"
           mapfile -t failed < <(sed -nE 's/^test ([A-Za-z0-9_:]+) \.\.\. FAILED$/\1/p' "$log.lf" | sort -u)
           # Each target's results follow its `Running`/`Doc-tests` line; count the targets that named a failed test.
           named=$(awk '/^ *(Running|Doc-tests) / { target = $0 } /^test [A-Za-z0-9_:]+ \.\.\. FAILED$/ { seen[target] = 1 }
@@ -1156,7 +1157,7 @@ jobs:
               # binary that has it.
               status=0
               "${run[@]}" --tests -- "$name" --exact 2>&1 | tee "$out" || status=$?
-              if [ "$status" -ne 0 ] || ! tr -d '\r' < "$out" | grep -qxF "test $name ... ok"; then
+              if [ "$status" -ne 0 ] || ! tr -d '\r' < "$out" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -qxF "test $name ... ok"; then
                 echo "$name failed rerun $attempt of 3 (exit $status)"
                 exit 1
               fi
