@@ -63,10 +63,19 @@ jobs:
           commit=$(git rev-parse FETCH_HEAD)
           git fetch -q --filter=tree:0 origin dev:refs/remotes/origin/dev
           dev_base=$(git merge-base "$commit" origin/dev)
-          # OpenTUI pinned by release (`tag = "vX.Y.Z"`, whose commit Cargo.lock records) or by commit (`rev`).
+          # OpenTUI pinned by release from crates.io (`version = "=X.Y.Z"`, package anomalyco-opentui, tag vX.Y.Z, whose
+          # commit the tag names), by release from git (`tag = "vX.Y.Z"`, whose commit Cargo.lock records), or by commit
+          # (`rev`).
           dep=$(git show "$commit:packages/cli-rs/Cargo.toml" | grep -E '^opentui *= *\{') || { echo "no opentui dependency"; exit 1; }
           tag=$(sed -nE 's/.*[{,] *tag *= *"([^"]+)".*/\1/p' <<<"$dep")
-          if [ -n "$tag" ]; then
+          version=$(grep -vE '[{,] *(git|path) *=' <<<"$dep" | sed -nE 's/.*[{,] *version *= *"=([^"]+)".*/\1/p' || true)
+          if [ -n "$version" ]; then
+            tag=v$version
+            # The commit of an annotated tag is its peeled ref (`^{}`); a lightweight tag has only its own.
+            refs=$(git ls-remote https://github.com/anomalyco/opentui "refs/tags/$tag" "refs/tags/$tag^{}")
+            rev=$(awk -v peeled="refs/tags/$tag^{}" '$2 == peeled { print $1 }' <<<"$refs")
+            rev=${rev:-$(awk '{ print $1 }' <<<"$refs")}
+          elif [ -n "$tag" ]; then
             rev=$(git show "$commit:packages/cli-rs/Cargo.lock" |
               sed -nE "s|^source = \"git\+https://github\.com/anomalyco/opentui(\.git)?\?tag=$tag#([0-9a-f]{40})\"$|\2|p" | sort -u)
           else
