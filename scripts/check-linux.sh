@@ -4,8 +4,8 @@
 # Usage: scripts/check-linux.sh <binary> <gnu|musl>
 #   gnu:  every GLIBC_ symbol version at or below 2.17, OpenTUI's own floor; no C++ runtime (libstdc++, GLIBCXX_,
 #         CXXABI_), which the static OpenTUI archive and the Zig link carry inside the binary.
-#   musl: dynamically linked against musl (a static musl binary cannot dlopen native plugins), and needing nothing
-#         beyond musl itself and libgcc_s.
+#   musl: fully static (O-188): no program interpreter and no needed library, so it runs on any Linux. It loads no
+#         native plugins, which the client compiles out of a static musl build.
 # Prints what the binary needs, for the job summary, and exits 1 on the first broken floor.
 set -euo pipefail
 
@@ -36,10 +36,8 @@ case $libc in
     fi
     ;;
   musl)
-    case $interp in /lib/ld-musl-*.so.1) ;; *) die "not dynamically linked against musl (interpreter '${interp:-none}')" ;; esac
-    for lib in $needed; do
-      case $lib in libc.so | libc.musl-*.so.1 | libgcc_s.so.1) ;; *) die "needs $lib, which musl does not provide" ;; esac
-    done
+    [ -z "$interp" ] || die "not static: it requests the program interpreter $interp"
+    [ -z "$needed" ] || die "not static: it needs $needed"
     ;;
   *) die "unknown libc $libc" ;;
 esac

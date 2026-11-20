@@ -304,9 +304,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux matches OpenTUI's floors (O-164): glibc 2.17 through cargo zigbuild, and musl, linked dynamically so
-          # native plugins load. musl is optional until it has passed: a client from before its .cargo/config.toml
-          # musl section builds a static binary, which the floor check refuses.
+          # Linux matches OpenTUI's floors (O-164): glibc 2.17 through cargo zigbuild. musl links fully static and
+          # loads no native plugins (O-188). musl is optional until it has passed: a client from before musl-static
+          # links musl dynamically, which the floor check refuses.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             lto: fat
@@ -431,8 +431,8 @@ jobs:
         run: |
           start=$(date +%s)
           if [ -n "$LIBC" ]; then
-            # Zig links against glibc 2.17's symbols, or against musl dynamically (the client's .cargo/config.toml gives
-            # musl -crt-static and Zig's -dynamic); its output lands in target/$TARGET as cargo's does.
+            # Zig links against glibc 2.17's symbols, or musl statically (Rust's default crt-static, where the client
+            # compiles native plugins out); its output lands in target/$TARGET as cargo's does.
             cargo zigbuild --locked --profile dist --target "$ZIG_TARGET" --bin "$BIN"
           else
             cargo build --locked --profile dist --target "$TARGET" --bin "$BIN"
@@ -484,26 +484,38 @@ jobs:
           if [ "$LIBC" = gnu ]; then scripts/check-linux.sh stage/opencode gnu | tee -a "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Smoke test
-        # A musl binary needs musl's loader, which the runner lacks: its smoke runs in Alpine below. A fresh box: no
-        # other opencode on PATH, the bundled server for the service, a mock provider for a session, and a TypeScript
-        # TUI plugin on the bundled Bun (scripts/smoke-bundle.sh).
-        if: env.LIBC != 'musl'
+        # A fresh box: no other opencode on PATH, the bundled server for the service, a mock provider for a session,
+        # and a TypeScript TUI plugin on the bundled Bun (scripts/smoke-bundle.sh). The static musl client runs here as
+        # it is, and refuses native plugins, which it compiles out (O-188); the bundled server's musl Bun needs musl's
+        # loader and libstdc++, so the musl bundle's smoke runs in Alpine below.
         run: |
           set -euo pipefail
           file stage/opencode-native stage/opencode
           out=$($RUN stage/opencode-native --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
-          scripts/smoke-bundle.sh stage | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Sample plugin
-        # An in-repo native plugin, linked as the client is, for the floor's smoke: it loads through dlopen.
+          if [ "$LIBC" = musl ]; then
+            if refused=$(stage/opencode-native plugin test /nonexistent/plugin.so 2>&1); then
+              echo "plugin test ran on the static musl build: $refused"
+              exit 1
+            fi
+            echo "$refused"
+            case $refused in *"static musl build"*) ;; *) echo "plugin test did not name the static musl build"; exit 1 ;; esac
+          else
+            scripts/smoke-bundle.sh stage | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Floor smoke files
+        # The bundle for the floor's smoke, and on glibc an in-repo native plugin, linked as the client is: it loads
+        # through dlopen. musl loads none.
         if: env.LIBC != ''
         working-directory: opencode/packages/cli-rs
         run: |
           set -euo pipefail
-          cargo zigbuild --locked --release --manifest-path crates/plugin/examples/sample/Cargo.toml --target "$ZIG_TARGET"
           mkdir -p "$RUNNER_TEMP/smoke/bundle"
-          cp "crates/plugin/examples/sample/target/$TARGET/release/libopencode_sample_plugin.so" "$RUNNER_TEMP/smoke/plugin.so"
+          if [ "$LIBC" = gnu ]; then
+            cargo zigbuild --locked --release --manifest-path crates/plugin/examples/sample/Cargo.toml --target "$ZIG_TARGET"
+            cp "crates/plugin/examples/sample/target/$TARGET/release/libopencode_sample_plugin.so" "$RUNNER_TEMP/smoke/plugin.so"
+          fi
           cp "$GITHUB_WORKSPACE/stage/opencode-native" "$GITHUB_WORKSPACE/stage/opencode" "$RUNNER_TEMP/smoke/bundle/"
           cp -r "$GITHUB_WORKSPACE/scripts" "$GITHUB_WORKSPACE/bench" "$RUNNER_TEMP/smoke/"
       - name: Smoke test on the floor (CentOS 7, glibc 2.17)
@@ -524,19 +536,18 @@ jobs:
           case $out in *"$VERSION"*"sample plugin v1"*"opencode v$VERSION"*) ;; *) echo "no version, plugin frame or bundled server"; exit 1 ;; esac
           [ "$(tail -n 1 <<<"$out" | head -c 1)" = "[" ] || { echo "session list printed no JSON array"; exit 1; }
       - name: Smoke test on the floor (Alpine, musl)
-        # A bare Alpine runs the client on musl alone; the bundled server's Bun needs libstdc++ and libgcc, which
-        # OpenCode's Docker image adds too. Then the bundle's smoke test, as on the other legs.
+        # The bundled server's musl Bun needs musl's loader, libstdc++ and libgcc, which OpenCode's Docker image adds
+        # too; the static client needs nothing. Then the bundle's smoke test, as on the other legs.
         if: env.LIBC == 'musl'
         run: |
           set -euo pipefail
           out=$(docker run --rm -e HOME=/tmp -e TMPDIR=/tmp -v "$RUNNER_TEMP/smoke:/work:ro" alpine:3.22 sh -euc '
             cat /etc/alpine-release
             /work/bundle/opencode-native --version
-            /work/bundle/opencode-native plugin test /work/plugin.so
             apk add --no-cache libgcc libstdc++ bash python3 >/dev/null
             bash /work/scripts/smoke-bundle.sh /work/bundle')
           echo "$out"
-          case $out in *"$VERSION"*"sample plugin v1"*"smoke: ok"*) ;; *) echo "no version, plugin frame or bundle smoke"; exit 1 ;; esac
+          case $out in *"$VERSION"*"smoke: ok"*) ;; *) echo "no version or bundle smoke"; exit 1 ;; esac
 
       - uses: actions/download-artifact@v5
         with:

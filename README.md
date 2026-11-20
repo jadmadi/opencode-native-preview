@@ -81,8 +81,8 @@ This checks the newest build against `SHA256SUMS` and installs `opencode-native`
 `$OPENCODE_NATIVE_INSTALL_DIR`). The bundled `opencode` stays off `PATH`, so your own `opencode`, if you have one, is
 untouched. Run the script again to update both; the next start of the TUI restarts a service of the old version.
 Linux builds need glibc 2.17 or newer (OpenTUI's floor). On Alpine and other musl systems the script installs the musl
-build: the client needs nothing but musl, and the bundled server's Bun needs `apk add libstdc++ libgcc`, as OpenCode's
-own Docker image installs. To verify an archive's build attestation:
+build: the client is fully static and runs on any Linux, but loads no native plugins and has no Zed editor context; the
+bundled server's Bun needs `apk add libstdc++ libgcc`, as OpenCode's own Docker image installs. To verify an archive's build attestation:
 `gh attestation verify opencode-native-<version>-<target>.tar.gz --repo simonklee/opencode-native-preview`.
 
 On Debian and Ubuntu, download the `.deb` from the [latest release](https://github.com/simonklee/opencode-native-preview/releases)

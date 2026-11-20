@@ -41,7 +41,7 @@ if [ "$os" = darwin ]; then
   fi
 else
   if ls /lib/ld-musl-* >/dev/null 2>&1 || (ldd --version 2>&1 | grep -qi musl); then
-    # Alpine and other musl systems: a build linked against musl dynamically, as OpenTUI ships one.
+    # Alpine and other musl systems: the musl build, linked statically; it loads no native plugins.
     target=$arch-unknown-linux-musl
   else
     glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
