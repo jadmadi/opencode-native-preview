@@ -15,8 +15,8 @@ private = { ignore = true }
 # The licences the binary may carry. A crate under any other licence fails the build, so a new one is a decision.
 accepted = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "Zlib", "Unicode-3.0", "CC0-1.0"]
 
-# OpenTUI's bindings from crates.io (since v0.9.4) are `MIT AND LGPL-2.1-or-later`: the native library they link
+# OpenTUI's bindings from crates.io (opentui-sys since v0.9.6) are `MIT AND LGPL-2.1-or-later`: the native library they link
 # statically includes LGPL code (FFmpeg), which ships with its own files in licenses/opentui (O-156). Accepted for this
 # crate only, as the client's deny.toml does.
-[anomalyco-opentui-sys]
+[opentui-sys]
 accepted = ["LGPL-2.1-or-later"]

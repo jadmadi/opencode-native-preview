@@ -63,7 +63,7 @@ jobs:
           commit=$(git rev-parse FETCH_HEAD)
           git fetch -q --filter=tree:0 origin dev:refs/remotes/origin/dev
           dev_base=$(git merge-base "$commit" origin/dev)
-          # OpenTUI pinned by release from crates.io (`version = "=X.Y.Z"`, package anomalyco-opentui, tag vX.Y.Z, whose
+          # OpenTUI pinned by release from crates.io (`version = "=X.Y.Z"`, tag vX.Y.Z, whose
           # commit the tag names), by release from git (`tag = "vX.Y.Z"`, whose commit Cargo.lock records), or by commit
           # (`rev`).
           dep=$(git show "$commit:packages/cli-rs/Cargo.toml" | grep -E '^opentui *= *\{') || { echo "no opentui dependency"; exit 1; }
