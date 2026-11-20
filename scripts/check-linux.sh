@@ -4,8 +4,7 @@
 # Usage: scripts/check-linux.sh <binary> <gnu|musl>
 #   gnu:  every GLIBC_ symbol version at or below 2.17, OpenTUI's own floor; no C++ runtime (libstdc++, GLIBCXX_,
 #         CXXABI_), which the static OpenTUI archive and the Zig link carry inside the binary.
-#   musl: fully static (O-188): no program interpreter and no needed library, so it runs on any Linux. It loads no
-#         native plugins, which the client compiles out of a static musl build.
+#   musl: fully static (O-188): no program interpreter and no needed library, so it runs on any Linux.
 # Prints what the binary needs, for the job summary, and exits 1 on the first broken floor.
 set -euo pipefail
 
