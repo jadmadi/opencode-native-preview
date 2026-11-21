@@ -305,8 +305,8 @@ jobs:
       matrix:
         include:
           # Linux matches OpenTUI's floors (O-164): glibc 2.17 through cargo zigbuild. musl links fully static (O-188).
-          # No build loads native plugins: the client's default features leave them out (native-off). musl is optional
-          # until it has passed: a client from before musl-static links musl dynamically, which the floor check refuses.
+          # musl is optional until it has passed: a client from before musl-static links musl dynamically, which the
+          # floor check refuses.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             lto: fat
@@ -485,21 +485,14 @@ jobs:
 
       - name: Smoke test
         # A fresh box: no other opencode on PATH, the bundled server for the service, a mock provider for a session,
-        # and a TypeScript TUI plugin on the bundled Bun (scripts/smoke-bundle.sh). Every client refuses native plugins,
-        # which the default features leave out (native-off). The bundled server's musl Bun needs musl's loader and
-        # libstdc++, so the musl bundle's smoke runs in Alpine below.
+        # and a TypeScript TUI plugin on the bundled Bun (scripts/smoke-bundle.sh). The bundled server's musl Bun needs
+        # musl's loader and libstdc++, so the musl bundle's smoke runs in Alpine below.
         run: |
           set -euo pipefail
           file stage/opencode-native stage/opencode
           out=$($RUN stage/opencode-native --version)
           echo "$out"
           case $out in *"$VERSION"*) ;; *) echo "--version printed '$out', not $VERSION"; exit 1 ;; esac
-          if refused=$($RUN stage/opencode-native plugin test /nonexistent/plugin.so 2>&1); then
-            echo "plugin test ran without native plugins: $refused"
-            exit 1
-          fi
-          echo "$refused"
-          case $refused in *"no native plugin support"*) ;; *) echo "plugin test did not say the build has no native plugins"; exit 1 ;; esac
           if [ "$LIBC" != musl ]; then scripts/smoke-bundle.sh stage | tee -a "$GITHUB_STEP_SUMMARY"; fi
       - name: Floor smoke files
         # The bundle for the floor's smoke.
@@ -1058,26 +1051,6 @@ jobs:
           $env:PATH = "$env:OPENTUI_LIB_DIR;$env:PATH"
           cargo test --locked --target $env:TARGET -p opencode-cli --test windows_smoke -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "windows_smoke failed ($LASTEXITCODE)" }
-
-      - name: Smoke 6 - unwinding and thread-locals on arm64 (plugin containment)
-        # The first place anything links and runs on arm64 Windows: OpenTUI has no such runner. The loader's rows load
-        # sample plugin libraries (.dll, built for this target) whose commands and views panic; each panic unwinds
-        # inside its library or the test binary and is caught there (catch_unwind on SEH), with the containment
-        # depth and the hash caches in thread-locals. The release build leaves native plugins out, so the rows build
-        # with `--features native`. No cheap client path throws a C++ exception: Yoga's try/catch in OpenTUI's
-        # yoga-bridge.cpp is entered on every layout (Smoke 5's TUI), but Yoga throws only on an internal assertion that
-        # the native side's checks prevent.
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.target == 'aarch64-pc-windows-msvc' }}
-        shell: pwsh
-        working-directory: opencode/packages/cli-rs
-        env:
-          OPENTUI_LIB_DIR: ${{ github.workspace }}\native
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $env:PATH = "$env:OPENTUI_LIB_DIR;$env:PATH"
-          cargo test --locked --target $env:TARGET -p opencode-plugin --features native --lib -- contain:: loader::native::
-          if ($LASTEXITCODE -ne 0) { throw "plugin containment rows failed ($LASTEXITCODE)" }
 
       # After every smoke passed, so a zip that failed one never reaches the release (an optional target's job does not
       # fail it).

@@ -59,8 +59,9 @@ What differs:
 
 - Server plugins run in the TypeScript server and work as before.
 - TypeScript TUI plugins run on a JS host beside the client, on the bundled server's Bun.
-- Native TUI plugins (`.so`, `.dylib`) are off in these builds; a client built with `--features native` loads
-  them: see the [quick start](https://github.com/anomalyco/opencode/blob/oc-rust/packages/cli-rs/crates/plugin-abi/README.md).
+- TUI plugins written in Luau run in a sandbox inside the client. Native plugin libraries (`.so`, `.dylib`, `.dll`)
+  are listed as skipped and never loaded.
+- `opencode-native --no-plugins` starts with no Luau or TypeScript TUI plugins; the built-in ones still load.
 - `opencode-native upgrade` does not update a preview build; re-run the install script.
 - There is no `/restart`; use `opencode-native service restart`.
 - HTTPS trusts the system's root certificates; `NODE_EXTRA_CA_CERTS` is ignored.
