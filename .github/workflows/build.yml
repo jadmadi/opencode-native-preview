@@ -2,7 +2,7 @@ name: build
 
 # Builds opencode-native, the OpenCode native CLI (packages/cli-rs of anomalyco/opencode), at `ref` for each preview
 # platform, with the TypeScript opencode server built from the same commit bundled beside it (ts-cli), and
-# publishes one prerelease per build. The nightly run skips when `oc-rust` has not moved since the
+# publishes one prerelease per build. The nightly run skips when `native-next` has not moved since the
 # last release. Only a run of `main` publishes: a run dispatched on another branch builds, tests and smokes the same
 # way and keeps its archives as artifacts.
 on:
@@ -12,7 +12,7 @@ on:
     inputs:
       ref:
         description: Branch, tag or commit of anomalyco/opencode
-        default: oc-rust
+        default: native-next
         required: true
 
 # One group per branch: a newer run cancels an older one of the same branch, never main's.
@@ -53,7 +53,7 @@ jobs:
           path: preview
       - id: plan
         env:
-          REF: ${{ inputs.ref || 'oc-rust' }}
+          REF: ${{ inputs.ref || 'native-next' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -1043,7 +1043,7 @@ jobs:
           OPENCODE_SMOKE_OUT: ${{ runner.temp }}\smoke
         run: |
           $ErrorActionPreference = 'Stop'
-          # The test lands with W10; commits before it (the pushed oc-rust today) have nothing to run.
+          # The test lands with W10; commits before it have nothing to run.
           if (-not (Test-Path crates\cli\tests\windows_smoke.rs)) {
             'windows_smoke.rs is not in this commit; skipped' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
             exit 0
@@ -1186,7 +1186,7 @@ jobs:
       OPENTUI_TAG: ${{ needs.plan.outputs.opentui_tag }}
       OPENTUI_REV: ${{ needs.plan.outputs.opentui_rev }}
       HEADER: ${{ needs.plan.outputs.header_fnv1a64 }}
-      REF: ${{ inputs.ref || 'oc-rust' }}
+      REF: ${{ inputs.ref || 'native-next' }}
       VERSION: ${{ needs.plan.outputs.version }}
       ZIG_VERSION: ${{ needs.plan.outputs.zig_version }}
     steps:
